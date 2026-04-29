@@ -48,3 +48,14 @@ _deps
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+# AI assistant files
+**/.agents/
+**/.codex/
+**/.prompts/
+*.instructions.md
+*.prompt.md
+*.agent.md
+*.skill.md
+copilot-instructions.md
+AGENTS.md
