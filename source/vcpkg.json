@@ -2,7 +2,13 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "dependencies": [
     "glew",
-    { "name": "sdl3", "default-features": false, "features": ["wayland", "x11", "alsa", "ibus"], "platform": "linux" },
+    "vulkan",
+    "volk",
+    "shaderc",
+    "spirv-tools",
+    { "name": "vulkan-validationlayers", "platform": "linux | windows" },
+    { "name": "vulkan-tools", "platform": "linux" },
+    { "name": "sdl3", "default-features": false, "features": ["wayland", "x11", "alsa", "ibus", "vulkan"], "platform": "linux" },
     { "name": "sdl3", "platform": "!linux" },
     { "name": "cpptrace", "platform": "!windows" },
     "libvorbis",
@@ -15,7 +21,7 @@
     { "name": "jemalloc", "platform": "linux" },
     "re2",
     "abseil",
-    { "name": "imgui", "features": ["sdl3-binding", "opengl3-binding", "freetype"] },
+    { "name": "imgui", "features": ["sdl3-binding", "opengl3-binding", "vulkan-binding", "freetype"] },
     { "name": "cpr", "version>=": "1.10.5", "features": ["ssl"] }
   ]
 }

@@ -17,13 +17,9 @@ TilePainter::TilePainter(RendererPtr renderer) : TileDrawer() {
   auto& root = Root::singleton();
   auto assets = root.assets();
 
-  m_terrainChunkCache.setTimeToLive(assets->json("/rendering.config:chunkCacheTimeout").toInt());
-  m_terrainChunkCache.setTimeSmear(m_terrainChunkCache.timeToLive() / 4);
-
-  m_liquidChunkCache.setTimeToLive(assets->json("/rendering.config:chunkCacheTimeout").toInt());
-  m_liquidChunkCache.setTimeSmear(m_liquidChunkCache.timeToLive() / 4);
-
-  m_textureCache.setTimeToLive(assets->json("/rendering.config:textureTimeout").toInt());
+  m_reloadTracker = make_shared<TrackerListener>();
+  root.registerReloadListener(m_reloadTracker);
+  refreshRenderConfig();
 
   for (auto const& liquid : root.liquidsDatabase()->allLiquidSettings()) {
     m_liquids.set(liquid->id, LiquidInfo{
@@ -60,21 +56,54 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
     m_cameraPan = renderData.geometry.diff(cameraCenter, *m_lastCameraCenter);
   m_lastCameraCenter = cameraCenter;
 
+  m_cameraTransformation = Mat3F::identity();
+  m_cameraTransformation.translate(-Vec2F(camera.worldTileRect().min()));
+  m_cameraTransformation.scale(TilePixels * camera.pixelRatio());
+  m_cameraTransformation.translate(camera.tileMinScreen());
+
   //Kae: Padded by one to fix culling issues with certain tile pieces at chunk borders, such as grass.
   RectI chunkRange = RectI::integral(RectF(camera.worldTileRect().padded(1)).scaled(1.0f / RenderChunkSize));
 
-  size_t chunks = chunkRange.volume();
-  m_pendingTerrainChunks.resize(chunks);
-  m_pendingLiquidChunks.resize(chunks);
+  m_backgroundTerrainBuffers.clear();
+  m_midgroundTerrainBuffers.clear();
+  m_foregroundTerrainBuffers.clear();
+  m_liquidBuffers.clear();
 
-  size_t i = 0;
+  Map<QuadZLevel, List<RenderBufferPtr>> backgroundBuffersByZ;
+  Map<QuadZLevel, List<RenderBufferPtr>> midgroundBuffersByZ;
+  Map<QuadZLevel, List<RenderBufferPtr>> foregroundBuffersByZ;
+
   for (int x = chunkRange.xMin(); x < chunkRange.xMax(); ++x) {
     for (int y = chunkRange.yMin(); y < chunkRange.yMax(); ++y) {
-      size_t index = i++;
-      m_pendingTerrainChunks[index] = getTerrainChunk(renderData, {x, y});
-      m_pendingLiquidChunks [index] =  getLiquidChunk(renderData, {x, y});
+      auto terrainChunk = getTerrainChunk(renderData, {x, y});
+      auto liquidChunk = getLiquidChunk(renderData, {x, y});
+
+      if (auto backgroundLayer = terrainChunk->ptr(TerrainLayer::Background)) {
+        for (auto const& pair : *backgroundLayer)
+          backgroundBuffersByZ[pair.first].append(pair.second);
+      }
+
+      if (auto midgroundLayer = terrainChunk->ptr(TerrainLayer::Midground)) {
+        for (auto const& pair : *midgroundLayer)
+          midgroundBuffersByZ[pair.first].append(pair.second);
+      }
+
+      if (auto foregroundLayer = terrainChunk->ptr(TerrainLayer::Foreground)) {
+        for (auto const& pair : *foregroundLayer)
+          foregroundBuffersByZ[pair.first].append(pair.second);
+      }
+
+      for (auto const& pair : *liquidChunk)
+        m_liquidBuffers.append(pair.second);
     }
   }
+
+  for (auto& pair : backgroundBuffersByZ)
+    m_backgroundTerrainBuffers.appendAll(std::move(pair.second));
+  for (auto& pair : midgroundBuffersByZ)
+    m_midgroundTerrainBuffers.appendAll(std::move(pair.second));
+  for (auto& pair : foregroundBuffersByZ)
+    m_foregroundTerrainBuffers.appendAll(std::move(pair.second));
 }
 
 void TilePainter::renderBackground(WorldCamera const& camera) {
@@ -85,16 +114,9 @@ void TilePainter::renderMidground(WorldCamera const& camera) {
   renderTerrainChunks(camera, TerrainLayer::Midground);
 }
 
-void TilePainter::renderLiquid(WorldCamera const& camera) {
-  Mat3F transformation = Mat3F::identity();
-  transformation.translate(-Vec2F(camera.worldTileRect().min()));
-  transformation.scale(TilePixels * camera.pixelRatio());
-  transformation.translate(camera.tileMinScreen());
-
-  for (auto const& chunk : m_pendingLiquidChunks) {
-    for (auto const& p : *chunk)
-      m_renderer->renderBuffer(p.second, transformation);
-  }
+void TilePainter::renderLiquid(WorldCamera const& /*camera*/) {
+  for (auto const& buffer : m_liquidBuffers)
+    m_renderer->renderBuffer(buffer, m_cameraTransformation);
 
   m_renderer->flush();
 }
@@ -104,12 +126,59 @@ void TilePainter::renderForeground(WorldCamera const& camera) {
 }
 
 void TilePainter::cleanup() {
-  m_pendingTerrainChunks.clear();
-  m_pendingLiquidChunks.clear();
+  m_backgroundTerrainBuffers.clear();
+  m_midgroundTerrainBuffers.clear();
+  m_foregroundTerrainBuffers.clear();
+  m_liquidBuffers.clear();
+}
+
+void TilePainter::cleanupCache() {
+  if (m_reloadTracker->pullTriggered())
+    refreshRenderConfig();
 
   m_textureCache.cleanup();
   m_terrainChunkCache.cleanup();
   m_liquidChunkCache.cleanup();
+}
+
+void TilePainter::refreshRenderConfig() {
+  auto assets = Root::singleton().assets();
+  auto renderingConfig = assets->json("/rendering.config");
+
+  float cacheRetentionMultiplier = renderingConfig.optFloat("cacheRetentionMultiplier").value(1.0f);
+  if (cacheRetentionMultiplier < 1.0f)
+    cacheRetentionMultiplier = 1.0f;
+
+  int64_t chunkCacheTimeout = (int64_t)(renderingConfig.getInt("chunkCacheTimeout") * cacheRetentionMultiplier);
+  if (chunkCacheTimeout < 1)
+    chunkCacheTimeout = 1;
+
+  int64_t textureTimeout = (int64_t)(renderingConfig.getInt("textureTimeout") * cacheRetentionMultiplier);
+  if (textureTimeout < 1)
+    textureTimeout = 1;
+
+  m_terrainChunkCache.setTimeToLive(chunkCacheTimeout);
+  m_terrainChunkCache.setTimeSmear(chunkCacheTimeout / 4);
+
+  m_liquidChunkCache.setTimeToLive(chunkCacheTimeout);
+  m_liquidChunkCache.setTimeSmear(chunkCacheTimeout / 4);
+
+  m_textureCache.setTimeToLive(textureTimeout);
+
+  if (auto terrainChunkCacheMax = renderingConfig.optUInt("terrainChunkCacheMax"))
+    m_terrainChunkCache.setMaxSize(*terrainChunkCacheMax);
+  else
+    m_terrainChunkCache.setMaxSize(NPos);
+
+  if (auto liquidChunkCacheMax = renderingConfig.optUInt("liquidChunkCacheMax"))
+    m_liquidChunkCache.setMaxSize(*liquidChunkCacheMax);
+  else
+    m_liquidChunkCache.setMaxSize(NPos);
+
+  if (auto tileTextureCacheMax = renderingConfig.optUInt("tileTextureCacheMax"))
+    m_textureCache.setMaxSize(*tileTextureCacheMax);
+  else
+    m_textureCache.setMaxSize(NPos);
 }
 
 size_t TilePainter::TextureKeyHash::operator()(TextureKey const& key) const {
@@ -148,22 +217,17 @@ TilePainter::ChunkHash TilePainter::liquidChunkHash(WorldRenderData& renderData,
   return XXH3_64bits(buffer.ptr(), buffer.size());
 }
 
-void TilePainter::renderTerrainChunks(WorldCamera const& camera, TerrainLayer terrainLayer) {
-  Map<QuadZLevel, List<RenderBufferPtr>> zOrderBuffers;
-  for (auto const& chunk : m_pendingTerrainChunks) {
-    for (auto const& pair : chunk->value(terrainLayer))
-      zOrderBuffers[pair.first].append(pair.second);
-  }
+void TilePainter::renderTerrainChunks(WorldCamera const& /*camera*/, TerrainLayer terrainLayer) {
+  List<RenderBufferPtr> const* terrainBuffers = nullptr;
+  if (terrainLayer == TerrainLayer::Background)
+    terrainBuffers = &m_backgroundTerrainBuffers;
+  else if (terrainLayer == TerrainLayer::Midground)
+    terrainBuffers = &m_midgroundTerrainBuffers;
+  else
+    terrainBuffers = &m_foregroundTerrainBuffers;
 
-  Mat3F transformation = Mat3F::identity();
-  transformation.translate(-Vec2F(camera.worldTileRect().min()));
-  transformation.scale(TilePixels * camera.pixelRatio());
-  transformation.translate(camera.tileMinScreen());
-
-  for (auto const& pair : zOrderBuffers) {
-    for (auto const& buffer : pair.second)
-      m_renderer->renderBuffer(buffer, transformation);
-  }
+  for (auto const& buffer : *terrainBuffers)
+    m_renderer->renderBuffer(buffer, m_cameraTransformation);
 
   m_renderer->flush();
 }

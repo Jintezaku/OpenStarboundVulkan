@@ -11,6 +11,7 @@
 #include "StarRenderer.hpp"
 #include "StarKeyBindings.hpp"
 #include "StarMixer.hpp"
+#include "StarListener.hpp"
 
 namespace Star {
 
@@ -135,6 +136,8 @@ public:
   void cleanup();
 
 private:
+  void refreshRenderConfig();
+
   static GuiContext* s_singleton;
 
   MixerPtr m_mixer;
@@ -148,8 +151,13 @@ private:
   KeyBindings m_keyBindings;
 
   float m_interfaceScale;
+  int64_t m_textureTimeout;
+  int64_t m_nextCleanupTime;
+  int64_t m_cacheCleanupInterval;
 
   bool m_shiftHeld;
+
+  TrackerListenerPtr m_reloadTracker;
 };
 
 }

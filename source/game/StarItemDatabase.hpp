@@ -158,6 +158,7 @@ private:
     StringList agingScripts;
     Maybe<String> assetsConfig;
     JsonObject customConfig;
+    Maybe<String> modSourceIcon;
     String directory;
     String filename;
   };

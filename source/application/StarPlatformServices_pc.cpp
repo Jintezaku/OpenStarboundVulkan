@@ -1,6 +1,7 @@
 #include "StarLogging.hpp"
 #include "StarPlatformServices_pc.hpp"
 #include "StarP2PNetworkingService_pc.hpp"
+#include "StarSteamDeck.hpp"
 
 #ifdef STAR_ENABLE_STEAM_INTEGRATION
 #include "StarStatisticsService_pc_steam.hpp"
@@ -81,54 +82,65 @@ PcPlatformServicesState::PcPlatformServicesState()
 #endif
 
 #ifdef STAR_ENABLE_DISCORD_INTEGRATION
-  static int64_t const DiscordEventSleep = 3;
+  bool shouldLoadDiscord = !platformEnvEnabled("OPENSTARBOUND_DISABLE_DISCORD");
 
-  discord::Core* discordCorePtr = nullptr;
-  discord::Result res = discord::Core::Create(DiscordClientId, DiscordCreateFlags_NoRequireDiscord, &discordCorePtr);
-  if (res == discord::Result::Ok && discordCorePtr) {
-    discordCore.reset(discordCorePtr);
-    discordAvailable = true;
-
-    discordCore->UserManager().OnCurrentUserUpdate.Connect([this](){
-        discord::User user;
-        auto res = discordCore->UserManager().GetCurrentUser(&user);
-        if (res != discord::Result::Ok)
-          Logger::error("Could not get current Discord user. (err {})", (int)res);
-        else
-          discordCurrentUser = user;
-      });
-
-  } else {
-    Logger::error("Failed to instantiate Discord core (err {})", (int)res);
+  if (shouldLoadDiscord && isSteamDeck() && !platformEnvEnabled("OPENSTARBOUND_ENABLE_DISCORD_ON_STEAM_DECK")) {
+    Logger::info("Skipping Discord platform initialization on Steam Deck");
+    shouldLoadDiscord = false;
   }
 
-  if (discordAvailable) {
-    MutexLocker locker(discordMutex);
-    discordCore->SetLogHook(discord::LogLevel::Info, [](discord::LogLevel level, char const* msg) {
-      if (level == discord::LogLevel::Debug)
-        Logger::debug("[Discord]: {}", msg);
-      else if (level == discord::LogLevel::Error)
-        Logger::debug("[Discord]: {}", msg);
-      else if (level == discord::LogLevel::Info)
-        Logger::info("[Discord]: {}", msg);
-      else if (level == discord::LogLevel::Warn)
-        Logger::warn("[Discord]: {}", msg);
-    });
-    discordEventShutdown = false;
-    discordEventThread = Thread::invoke("PcPlatformServices::discordEventThread", [this]() {
-        while (!discordEventShutdown) {
-          {
-            MutexLocker locker(discordMutex);
-            discordCore->RunCallbacks();
-            discordCore->LobbyManager().FlushNetwork();
-          }
-          Thread::sleep(DiscordEventSleep);
-        }
-      });
+  if (shouldLoadDiscord) {
+    static int64_t const DiscordEventSleep = 3;
 
-    Logger::info("Initialized Discord platform services");
+    discord::Core* discordCorePtr = nullptr;
+    discord::Result res = discord::Core::Create(DiscordClientId, DiscordCreateFlags_NoRequireDiscord, &discordCorePtr);
+    if (res == discord::Result::Ok && discordCorePtr) {
+      discordCore.reset(discordCorePtr);
+      discordAvailable = true;
+
+      discordCore->UserManager().OnCurrentUserUpdate.Connect([this](){
+          discord::User user;
+          auto res = discordCore->UserManager().GetCurrentUser(&user);
+          if (res != discord::Result::Ok)
+            Logger::error("Could not get current Discord user. (err {})", (int)res);
+          else
+            discordCurrentUser = user;
+        });
+
+    } else {
+      Logger::error("Failed to instantiate Discord core (err {})", (int)res);
+    }
+
+    if (discordAvailable) {
+      MutexLocker locker(discordMutex);
+      discordCore->SetLogHook(discord::LogLevel::Info, [](discord::LogLevel level, char const* msg) {
+        if (level == discord::LogLevel::Debug)
+          Logger::debug("[Discord]: {}", msg);
+        else if (level == discord::LogLevel::Error)
+          Logger::debug("[Discord]: {}", msg);
+        else if (level == discord::LogLevel::Info)
+          Logger::info("[Discord]: {}", msg);
+        else if (level == discord::LogLevel::Warn)
+          Logger::warn("[Discord]: {}", msg);
+      });
+      discordEventShutdown = false;
+      discordEventThread = Thread::invoke("PcPlatformServices::discordEventThread", [this]() {
+          while (!discordEventShutdown) {
+            {
+              MutexLocker locker(discordMutex);
+              discordCore->RunCallbacks();
+              discordCore->LobbyManager().FlushNetwork();
+            }
+            Thread::sleep(DiscordEventSleep);
+          }
+        });
+
+      Logger::info("Initialized Discord platform services");
+    } else {
+      Logger::info("Was not able to authenticate with Discord and create all components, Discord services will be unavailable");
+    }
   } else {
-    Logger::info("Was not able to authenticate with Discord and create all components, Discord services will be unavailable");
+    Logger::info("Skipping Discord platform initialization");
   }
 #endif
 }

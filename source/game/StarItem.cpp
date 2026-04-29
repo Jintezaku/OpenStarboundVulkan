@@ -58,6 +58,13 @@ Item::Item(Json config, String directory, Json parameters) {
   m_pickupSounds = jsonToStringSet(m_config.get("pickupSounds", JsonArray{}));
   if (!m_pickupSounds.size())
     m_pickupSounds = jsonToStringSet(assets->json("/items/defaultParameters.config:pickupSounds"));
+  if (auto modSourceIcon = instanceValue("modSourceIcon").optString()) {
+    String iconPath = *modSourceIcon;
+    if (!iconPath.beginsWith("/"))
+      iconPath = AssetPath::relativeTo(m_directory, iconPath);
+    if (assets->assetExists(AssetPath::split(iconPath).basePath))
+      m_modSourceIcon = iconPath;
+  }
 
   m_timeToLive = instanceValue("timeToLive", Root::singleton().assets()->json("/items/defaultParameters.config:defaultTimeToLive").toFloat()).toFloat();
 
@@ -190,6 +197,10 @@ bool Item::twoHanded() const {
 
 float Item::timeToLive() const {
   return m_timeToLive;
+}
+
+Maybe<String> Item::modSourceIcon() const {
+  return m_modSourceIcon;
 }
 
 uint64_t Item::price() const {

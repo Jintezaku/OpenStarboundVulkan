@@ -78,8 +78,13 @@ void LabelWidget::setTextStyle(TextStyle const& textStyle) {
   updateTextRegion();
 }
 
+Vec2I LabelWidget::size() const {
+  const_cast<LabelWidget*>(this)->refreshTextRegionIfNeeded();
+  return Widget::size();
+}
 
 RectI LabelWidget::relativeBoundRect() const {
+  const_cast<LabelWidget*>(this)->refreshTextRegionIfNeeded();
   return RectI(m_textRegion).translated(relativePosition());
 }
 
@@ -88,13 +93,20 @@ RectI LabelWidget::getScissorRect() const {
 }
 
 void LabelWidget::renderImpl() {
+  refreshTextRegionIfNeeded();
   context()->setTextStyle(m_style);
   context()->renderInterfaceText(m_text, {Vec2F(screenPosition()), m_hAnchor, m_vAnchor, m_wrapWidth, m_textCharLimit});
+}
+
+void LabelWidget::refreshTextRegionIfNeeded() {
+  if (m_interfaceScale != context()->interfaceScale())
+    updateTextRegion();
 }
 
 void LabelWidget::updateTextRegion() {
   context()->setTextStyle(m_style);
   m_textRegion = RectI(context()->determineInterfaceTextSize(m_text, {Vec2F(), m_hAnchor, m_vAnchor, m_wrapWidth, m_textCharLimit}));
+  m_interfaceScale = context()->interfaceScale();
   setSize(m_textRegion.size());
 }
 

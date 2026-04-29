@@ -342,7 +342,7 @@ void TileSectorArray<Tile, SectorSize>::tileEachTo(MultiArray& results, RectI co
   for (auto const& split : splitRect(region)) {
     auto clampedRect = yClampRect(split.rect);
     if (!clampedRect.isEmpty()) {
-      m_tileSectors.evalColumnsParallel(clampedRect.xMin(), clampedRect.yMin(), clampedRect.width(), clampedRect.height(), [&, function](size_t x, size_t y, Tile const* column, size_t columnSize) {
+      m_tileSectors.evalColumns(clampedRect.xMin(), clampedRect.yMin(), clampedRect.width(), clampedRect.height(), [&, function](size_t x, size_t y, Tile const* column, size_t columnSize) {
           size_t arrayColumnIndex = (x + split.xOffset + xArrayOffset) * results.size(1) + y + yArrayOffset;
           if (column) {
             for (size_t i = 0; i < columnSize; ++i)
@@ -411,16 +411,7 @@ void TileSectorArray<Tile, SectorSize>::tileEvalColumns(RectI const& region, Fun
 template <typename Tile, unsigned SectorSize>
 template <typename Function>
 void TileSectorArray<Tile, SectorSize>::tileEvalColumnsParallel(RectI const& region, Function&& function) {
-  for (auto const& split : splitRect(region)) {
-    auto clampedRect = yClampRect(split.rect);
-    if (!clampedRect.isEmpty()) {
-      auto fwrapper = [&](size_t x, size_t y, Tile* column, size_t columnSize) {
-        function(Vec2I((int)x + split.xOffset, (int)y), column, columnSize);
-        return true;
-      };
-      m_tileSectors.evalColumnsParallel(clampedRect.xMin(), clampedRect.yMin(), clampedRect.width(), clampedRect.height(), fwrapper, false);
-    }
-  }
+  tileEvalColumns(region, std::forward<Function>(function));
 }
 
 template <typename Tile, unsigned SectorSize>

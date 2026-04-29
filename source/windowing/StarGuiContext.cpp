@@ -4,6 +4,7 @@
 #include "StarMixer.hpp"
 #include "StarAssets.hpp"
 #include "StarImageMetadataDatabase.hpp"
+#include "StarTime.hpp"
 
 namespace Star {
 
@@ -30,8 +31,14 @@ GuiContext::GuiContext(MixerPtr mixer, ApplicationControllerPtr appController) {
   m_applicationController = std::move(appController);
 
   m_interfaceScale = 1;
+  m_nextCleanupTime = 0;
+  m_cacheCleanupInterval = 500;
 
   m_shiftHeld = false;
+
+  m_reloadTracker = make_shared<TrackerListener>();
+  Root::singleton().registerReloadListener(m_reloadTracker);
+  refreshRenderConfig();
 
   refreshKeybindings();
 }
@@ -42,7 +49,7 @@ GuiContext::~GuiContext() {
 
 void GuiContext::renderInit(RendererPtr renderer) {
   m_renderer = std::move(renderer);
-  auto textureGroup = m_renderer->createTextureGroup();
+  auto textureGroup = m_renderer->createTextureGroup(TextureGroupSize::Large);
   m_textureCollection = make_shared<AssetTextureGroup>(textureGroup);
   m_drawablePainter = make_shared<DrawablePainter>(m_renderer, m_textureCollection);
   m_textPainter = make_shared<TextPainter>(m_renderer, textureGroup);
@@ -471,11 +478,35 @@ float GuiContext::getDisplayScale() const {
 }
 
 void GuiContext::cleanup() {
-  int64_t textureTimeout = Root::singleton().assets()->json("/rendering.config:textureTimeout").toInt();
+  if (m_reloadTracker->pullTriggered())
+    refreshRenderConfig();
+
+  int64_t now = Time::monotonicMilliseconds();
+  if (now < m_nextCleanupTime)
+    return;
+
   if (m_textureCollection)
-    m_textureCollection->cleanup(textureTimeout);
+    m_textureCollection->cleanup(m_textureTimeout);
   if (m_textPainter)
-    m_textPainter->cleanup(textureTimeout);
+    m_textPainter->cleanup(m_textureTimeout);
+
+  m_nextCleanupTime = now + m_cacheCleanupInterval;
+}
+
+void GuiContext::refreshRenderConfig() {
+  auto renderingConfig = Root::singleton().assets()->json("/rendering.config");
+
+  float cacheRetentionMultiplier = renderingConfig.optFloat("cacheRetentionMultiplier").value(1.0f);
+  if (cacheRetentionMultiplier < 1.0f)
+    cacheRetentionMultiplier = 1.0f;
+
+  m_textureTimeout = (int64_t)(renderingConfig.getInt("textureTimeout") * cacheRetentionMultiplier);
+  if (m_textureTimeout < 1)
+    m_textureTimeout = 1;
+
+  m_cacheCleanupInterval = renderingConfig.optInt("cacheCleanupIntervalMs").value(500);
+  if (m_cacheCleanupInterval < 50)
+    m_cacheCleanupInterval = 50;
 }
 
 }

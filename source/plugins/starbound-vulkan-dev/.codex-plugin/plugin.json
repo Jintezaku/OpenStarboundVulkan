@@ -1,0 +1,42 @@
+{
+  "name": "starbound-vulkan-dev",
+  "version": "0.1.0",
+  "description": "Local automation and workflow helpers for Vulkan-first OpenStarbound development.",
+  "author": {
+    "name": "OpenStarbound Contributors",
+    "email": "maintainers@openstarbound.org",
+    "url": "https://github.com/OpenStarbound/OpenStarbound"
+  },
+  "homepage": "https://github.com/OpenStarbound/OpenStarbound",
+  "repository": "https://github.com/OpenStarbound/OpenStarbound",
+  "license": "MIT",
+  "keywords": [
+    "vulkan",
+    "openstarbound",
+    "graphics",
+    "developer-tools"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Starbound Vulkan Dev",
+    "shortDescription": "Vulkan build and run helpers for OpenStarbound.",
+    "longDescription": "Provides a local plugin surface for Vulkan-first OpenStarbound development workflows, including dependency bootstrap, validation checks, and renderer launch commands.",
+    "developerName": "OpenStarbound",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "Execute"
+    ],
+    "websiteURL": "https://github.com/OpenStarbound/OpenStarbound",
+    "privacyPolicyURL": "https://github.com/OpenStarbound/OpenStarbound",
+    "termsOfServiceURL": "https://github.com/OpenStarbound/OpenStarbound",
+    "defaultPrompt": [
+      "Set up this machine for OpenStarbound Vulkan development and verify toolchain health.",
+      "Install VS Code extensions and Codex skill assets for this workspace.",
+      "Build using the linux-vulkan-dev preset and run the client on Vulkan.",
+      "Diagnose Vulkan swapchain startup failures and propose concrete fixes."
+    ],
+    "brandColor": "#3D6B52"
+  }
+}

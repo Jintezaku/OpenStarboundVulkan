@@ -465,13 +465,14 @@ void WorldServer::handleIncomingPackets(ConnectionId clientId, List<PacketPtr> c
 
     } else if (auto entityUpdateSet = as<EntityUpdateSetPacket>(packet)) {
       float interpolationLeadTime = clientInfo->interpolationTracker.interpolationLeadTime();
-      m_entityMap->forAllEntities([&](EntityPtr const& entity) {
-          EntityId entityId = entity->entityId();
-          if (connectionForEntity(entityId) == clientId) {
+      for (auto const& delta : entityUpdateSet->deltas) {
+        if (auto entity = m_entityMap->entity(delta.first)) {
+          if (connectionForEntity(delta.first) == clientId) {
             starAssert(entity->isSlave());
-            entity->readNetState(entityUpdateSet->deltas.value(entityId), interpolationLeadTime, clientInfo->clientState.netCompatibilityRules());
+            entity->readNetState(delta.second, interpolationLeadTime, clientInfo->clientState.netCompatibilityRules());
           }
-        });
+        }
+      }
       clientInfo->pendingForward = true;
 
     } else if (auto entityDestroy = as<EntityDestroyPacket>(packet)) {
@@ -658,9 +659,7 @@ void WorldServer::update(float dt) {
 
       if (entity->shouldDestroy() && entity->entityMode() == EntityMode::Master)
         toRemove.append(entity->entityId());
-    }, [](EntityPtr const& a, EntityPtr const& b) {
-      return a->entityType() < b->entityType();
-    });
+    }, EntityIterationOrder::ByEntityType);
 
   for (auto& pair : m_scriptContexts)
     pair.second->update(pair.second->updateDt(dt));

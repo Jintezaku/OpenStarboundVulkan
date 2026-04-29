@@ -6,6 +6,7 @@
 #include "StarTextPainter.hpp"
 #include "StarDrawablePainter.hpp"
 #include "StarRenderer.hpp"
+#include "StarListener.hpp"
 
 namespace Star {
 
@@ -27,6 +28,7 @@ public:
   void adjustLighting(WorldRenderData& renderData);
 
 private:
+  void refreshRenderConfig();
   void renderParticles(WorldRenderData& renderData, Particle::Layer layer);
   void renderBars(WorldRenderData& renderData);
 
@@ -61,6 +63,14 @@ private:
   Vec2F m_parallaxWorldPosition;
 
   float m_preloadTextureChance;
+  float m_lightMapMultiplier;
+  int m_textParticleFontSize;
+  int m_particleRenderWindowPadding;
+  int64_t m_textureTimeout;
+  int64_t m_nextCleanupTime;
+  int64_t m_cacheCleanupInterval;
+
+  TrackerListenerPtr m_reloadTracker;
 };
 
 }

@@ -5,6 +5,7 @@
 #include "StarEncode.hpp"
 #include "StarLogging.hpp"
 #include "StarJsonExtra.hpp"
+#include "StarSteamDeck.hpp"
 #include "StarRoot.hpp"
 #include "StarVersion.hpp"
 #include "StarPlayer.hpp"
@@ -74,6 +75,7 @@ Json const AdditionalDefaultConfiguration = Json::parseJson(R"JSON(
       "zoomLevel" : 3.0,
       "cameraSpeedFactor" : 1.0,
       "interfaceScale" : 0,
+      "controllerInput" : false,
       "speechBubbles" : true,
 
       "title" : {
@@ -154,6 +156,53 @@ Json const AdditionalDefaultConfiguration = Json::parseJson(R"JSON(
     }
   )JSON");
 
+namespace {
+  unsigned const SteamDeckProfileVersion = 1;
+  Vec2U const SteamDeckNativeResolution = Vec2U(1280, 800);
+
+  void applySteamDeckProfile(ConfigurationPtr const& configuration) {
+    if (!isSteamDeck())
+      return;
+
+    if (configuration->get("steamDeckProfileVersion").optUInt().value(0) >= SteamDeckProfileVersion)
+      return;
+
+    bool changed = false;
+    auto setIfDifferent = [&](String const& key, Json const& value) {
+      if (configuration->get(key) != value) {
+        configuration->set(key, value);
+        changed = true;
+      }
+    };
+
+    auto deckResolution = jsonFromVec2U(SteamDeckNativeResolution);
+
+    auto windowedResolution = jsonToVec2U(configuration->get("windowedResolution", deckResolution));
+    if (windowedResolution[0] < SteamDeckNativeResolution[0] || windowedResolution[1] < SteamDeckNativeResolution[1])
+      setIfDifferent("windowedResolution", deckResolution);
+
+    auto fullscreenResolution = jsonToVec2U(configuration->get("fullscreenResolution", deckResolution));
+    if (fullscreenResolution[0] > SteamDeckNativeResolution[0] || fullscreenResolution[1] > SteamDeckNativeResolution[1])
+      setIfDifferent("fullscreenResolution", deckResolution);
+
+    if (configuration->get("interfaceScale").optFloat().value(0) >= 1.75f)
+      setIfDifferent("interfaceScale", 0);
+
+    if (!configuration->get("controllerInput").optBool().value(false))
+      setIfDifferent("controllerInput", true);
+
+    if (!configuration->get("limitTextureAtlasSize").optBool().value(false))
+      setIfDifferent("limitTextureAtlasSize", true);
+
+    if (configuration->get("borderless").optBool().value(false) && configuration->get("maximized").optBool().value(false))
+      setIfDifferent("maximized", false);
+
+    configuration->set("steamDeckProfileVersion", SteamDeckProfileVersion);
+    if (changed)
+      Logger::info("Applied Steam Deck client profile");
+  }
+}
+
 void ClientApplication::startup(StringList const& cmdLineArgs) {
   RootLoader rootLoader({AdditionalAssetsSettings, AdditionalDefaultConfiguration, String("starbound.log"), LogLevel::Info, false, String("starbound.config")});
   m_root = rootLoader.initOrDie(cmdLineArgs).first;
@@ -191,13 +240,15 @@ void ClientApplication::applicationInit(ApplicationControllerPtr appController) 
   appController->setCursorVisible(true);
 
   auto configuration = m_root->configuration();
+  applySteamDeckProfile(configuration);
+
   bool vsync = configuration->get("vsync").toBool();
   Vec2U windowedSize = jsonToVec2U(configuration->get("windowedResolution"));
   Vec2U fullscreenSize = jsonToVec2U(configuration->get("fullscreenResolution"));
   bool fullscreen = configuration->get("fullscreen").toBool();
   bool borderless = configuration->get("borderless").toBool();
   bool maximized = configuration->get("maximized").toBool();
-  m_controllerInput = configuration->get("controllerInput").optBool().value();
+  m_controllerInput = configuration->get("controllerInput").optBool().value(false);
   
   #ifdef STAR_SYSTEM_WINDOWS
     appController->setBorderlessWorkaround(configuration->get("borderlessWorkaround", true).toBool());
@@ -246,8 +297,16 @@ void ClientApplication::applicationInit(ApplicationControllerPtr appController) 
     ImFontConfig config{};
     config.FontDataOwnedByAtlas = false;
     config.FontBuilderFlags = ImGuiFreeTypeBuilderFlags_ForceAutoHint;
-    io.Fonts->AddFontFromMemoryTTF(m_immediateFont.ptr(), m_immediateFont.size(),
+    ImFont* immediateFont = io.Fonts->AddFontFromMemoryTTF(m_immediateFont.ptr(), m_immediateFont.size(),
       16, &config, io.Fonts->GetGlyphRangesDefault());
+    if (!immediateFont) {
+      Logger::warn("ImGui: failed to load '/hobo.ttf' for immediate UI font, using default font");
+      immediateFont = io.Fonts->AddFontDefault();
+    }
+
+    io.FontDefault = immediateFont;
+    if (!io.Fonts->IsBuilt())
+      io.Fonts->Build();
   }
 
   m_minInterfaceScale = assets->json("/interface.config:minInterfaceScale").toFloat();
@@ -276,6 +335,7 @@ void ClientApplication::renderInit(RendererPtr renderer) {
   renderer->setMultiTexturingEnabled(m_root->configuration()->get("useMultiTexturing").optBool().value(true));
 
   m_guiContext->renderInit(renderer);
+  refreshInterfaceScale();
 
   m_cinematicOverlay = make_shared<Cinematic>();
   m_errorScreen = make_shared<ErrorScreen>();
@@ -431,12 +491,7 @@ void ClientApplication::render() {
   renderer->setMultiSampling(config->get("antiAliasing").optBool().value(false) ? 4 : 0);
   renderer->switchEffectConfig("interface");
 
-  if (auto interfaceScale = config->get("interfaceScale").optFloat().value(); interfaceScale != 0)
-    m_guiContext->setInterfaceScale(interfaceScale);
-  else if (m_guiContext->windowWidth() >= m_crossoverRes[0] && m_guiContext->windowHeight() >= m_crossoverRes[1])
-    m_guiContext->setInterfaceScale(m_maxInterfaceScale);
-  else
-    m_guiContext->setInterfaceScale(m_minInterfaceScale);
+  refreshInterfaceScale();
 
   if (m_state == MainAppState::Mods || m_state == MainAppState::Splash) {
     m_cinematicOverlay->render();
@@ -523,7 +578,25 @@ void ClientApplication::renderReload() {
       Logger::warn("No rendering config found for renderer with id '{}'", renderer->rendererId());
   };
 
-  renderer->loadConfig(assets->json("/rendering/opengl.config"));
+  String rendererConfigPath = "/rendering/opengl.config";
+  auto rendererId = renderer->rendererId().toLower();
+  if (rendererId.contains("vulkan"))
+    rendererConfigPath = "/rendering/vulkan.config";
+  else if (rendererId.contains("direct3d12"))
+    rendererConfigPath = "/rendering/direct3d12.config";
+  else if (rendererId.contains("metal"))
+    rendererConfigPath = "/rendering/metal.config";
+
+  if (!assets->assetExists(rendererConfigPath)) {
+    if (rendererConfigPath != "/rendering/opengl.config")
+      Logger::warn("No renderer config found at '{}', falling back to '/rendering/opengl.config'", rendererConfigPath);
+    rendererConfigPath = "/rendering/opengl.config";
+  }
+
+  if (assets->assetExists(rendererConfigPath))
+    renderer->loadConfig(assets->json(rendererConfigPath));
+  else
+    Logger::warn("No renderer config found at '{}'", rendererConfigPath);
   
   loadEffectConfig("world");
   
@@ -569,6 +642,17 @@ void ClientApplication::renderReload() {
   }
 
   loadEffectConfig("interface");
+}
+
+void ClientApplication::refreshInterfaceScale() {
+  auto interfaceScale = m_root->configuration()->get("interfaceScale").optFloat().value();
+  if (interfaceScale != 0) {
+    m_guiContext->setInterfaceScale(interfaceScale);
+  } else if (renderer() && m_guiContext->windowWidth() >= m_crossoverRes[0] && m_guiContext->windowHeight() >= m_crossoverRes[1]) {
+    m_guiContext->setInterfaceScale(m_maxInterfaceScale);
+  } else {
+    m_guiContext->setInterfaceScale(m_minInterfaceScale);
+  }
 }
 
 void ClientApplication::setPostProcessLayerPasses(String const& layer, unsigned const& passes) {
@@ -692,6 +776,7 @@ void ClientApplication::changeState(MainAppState newState) {
     };
 
     m_mainMixer->setUniverseClient(m_universeClient);
+    refreshInterfaceScale();
     m_titleScreen = make_shared<TitleScreen>(m_playerStorage, m_mainMixer->mixer(), m_universeClient);
     if (auto renderer = Application::renderer())
       m_titleScreen->renderInit(renderer);
@@ -809,6 +894,7 @@ void ClientApplication::changeState(MainAppState newState) {
     m_titleScreen->stopMusic();
 
     m_universeClient->restartLua();
+    refreshInterfaceScale();
     m_mainInterface = make_shared<MainInterface>(m_universeClient, m_worldPainter, m_cinematicOverlay);
     m_universeClient->setLuaCallbacks("interface", LuaBindings::makeInterfaceCallbacks(m_mainInterface.get()));
     m_universeClient->setLuaCallbacks("chat", LuaBindings::makeChatCallbacks(m_mainInterface.get(), m_universeClient.get()));

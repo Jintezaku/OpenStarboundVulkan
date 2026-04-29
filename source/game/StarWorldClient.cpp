@@ -496,7 +496,7 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
       return;
 
     entity->renderLightSources(&lightingRenderCallback);
-  });
+  }, EntityIterationOrder::Natural);
 
   renderLightSources = std::move(lightingRenderCallback.lightSources);
 
@@ -605,9 +605,7 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
       m_previewTiles.appendAll(std::move(renderCallback.previewTiles));
       renderData.overheadBars.appendAll(std::move(renderCallback.overheadBars));
 
-    }, [](EntityPtr const& a, EntityPtr const& b) {
-      return a->entityId() < b->entityId();
-    });
+    }, EntityIterationOrder::ByEntityId);
 
   m_tileArray->tileEachTo(renderData.tiles, tileRange, [&](RenderTile& renderTile, Vec2I const&, ClientTile const& clientTile) {
       renderTile.foreground = clientTile.foreground;
@@ -847,13 +845,14 @@ void WorldClient::handleIncomingPackets(List<PacketPtr> const& packets) {
 
     } else if (auto entityUpdateSet = as<EntityUpdateSetPacket>(packet)) {
       float interpolationLeadTime = m_interpolationTracker.interpolationLeadTime();
-      m_entityMap->forAllEntities([&](EntityPtr const& entity) {
-          EntityId entityId = entity->entityId();
-          if (connectionForEntity(entityId) == entityUpdateSet->forConnection) {
+      for (auto const& delta : entityUpdateSet->deltas) {
+        if (auto entity = m_entityMap->entity(delta.first)) {
+          if (connectionForEntity(delta.first) == entityUpdateSet->forConnection) {
             starAssert(entity->isSlave());
-            entity->readNetState(entityUpdateSet->deltas.value(entityId), interpolationLeadTime, m_clientState.netCompatibilityRules());
+            entity->readNetState(delta.second, interpolationLeadTime, m_clientState.netCompatibilityRules());
           }
-        });
+        }
+      }
 
     } else if (auto entityDestroy = as<EntityDestroyPacket>(packet)) {
       if (auto entity = m_entityMap->entity(entityDestroy->entityId)) {
@@ -1199,13 +1198,15 @@ void WorldClient::update(float dt) {
         }
       }
 
-      if (entity->shouldDestroy() && entity->entityMode() == EntityMode::Master)
+      bool shouldDestroy = entity->shouldDestroy() && entity->entityMode() == EntityMode::Master;
+      if (!shouldDestroy && entity->isMaster() && !m_masterEntitiesNetVersion.contains(entity->entityId()))
+        notifyEntityCreate(entity);
+
+      if (shouldDestroy)
         toRemove.append(entity->entityId());
       if (entity->isMaster() && entity->clientEntityMode() == ClientEntityMode::ClientPresenceMaster)
         clientPresenceEntities.append(entity->entityId());
-    }, [](EntityPtr const& a, EntityPtr const& b) {
-      return a->entityType() < b->entityType();
-    });
+    }, EntityIterationOrder::ByEntityType);
 
   m_clientState.setPlayer(m_mainPlayer->entityId());
   m_clientState.setClientPresenceEntities(std::move(clientPresenceEntities));
@@ -1519,20 +1520,25 @@ void WorldClient::queueUpdatePackets(bool sendEntityUpdates) {
   if (m_currentStep % m_clientConfig.getInt("worldClientStateUpdateDelta") == 0)
     m_outgoingPackets.append(make_shared<WorldClientStateUpdatePacket>(m_clientState.writeDelta()));
 
-  m_entityMap->forAllEntities([&](EntityPtr const& entity) { notifyEntityCreate(entity); });
-
   if (sendEntityUpdates) {
     auto entityUpdateSet = make_shared<EntityUpdateSetPacket>();
     entityUpdateSet->forConnection = *m_clientId;
     auto netRules = m_clientState.netCompatibilityRules();
-    m_entityMap->forAllEntities([&](EntityPtr const& entity) {
-        if (auto version = m_masterEntitiesNetVersion.ptr(entity->entityId())) {
-          auto updateAndVersion = entity->writeNetState(*version, netRules);
+    auto versionIt = makeSMutableMapIterator(m_masterEntitiesNetVersion);
+    while (versionIt.hasNext()) {
+      auto& pair = versionIt.next();
+      if (auto entity = m_entityMap->entity(pair.first)) {
+        if (entity->isMaster()) {
+          auto updateAndVersion = entity->writeNetState(pair.second, netRules);
           if (!updateAndVersion.first.empty())
-            entityUpdateSet->deltas[entity->entityId()] = std::move(updateAndVersion.first);
-          *version = updateAndVersion.second;
+            entityUpdateSet->deltas[pair.first] = std::move(updateAndVersion.first);
+          pair.second = updateAndVersion.second;
+          continue;
         }
-      });
+      }
+
+      versionIt.remove();
+    }
     m_outgoingPackets.append(std::move(entityUpdateSet));
   }
 
@@ -1708,7 +1714,7 @@ void WorldClient::lightingTileGather() {
 
   // Each column in tileEvalColumns is guaranteed to be no larger than the sector size.
 
-  m_tileArray->tileEvalColumnsParallel(m_lightingCalculator.calculationRegion(), [&](Vec2I const& pos, ClientTile const* column, size_t ySize) {
+  m_tileArray->tileEvalColumns(m_lightingCalculator.calculationRegion(), [&](Vec2I const& pos, ClientTile const* column, size_t ySize) {
     size_t baseIndex = m_lightingCalculator.baseIndexFor(pos);
     for (size_t y = 0; y < ySize; ++y) {
       auto& tile = column[y];

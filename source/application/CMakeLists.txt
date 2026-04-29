@@ -9,26 +9,44 @@ SET (star_application_HEADERS
     StarApplication.hpp
     StarApplicationController.hpp
     StarMainApplication.hpp
+    StarRendererFactory.hpp
     StarRenderer.hpp
   )
 
 SET (star_application_SOURCES
     StarApplication.cpp
+    StarRendererFactory.cpp
     StarRenderer.cpp
   )
 
 SET (star_application_HEADERS ${star_application_HEADERS}
     StarP2PNetworkingService_pc.hpp
     StarPlatformServices_pc.hpp
-    StarRenderer_opengl.hpp
   )
 
 SET (star_application_SOURCES ${star_application_SOURCES}
     StarMainApplication_sdl.cpp
     StarP2PNetworkingService_pc.cpp
     StarPlatformServices_pc.cpp
-    StarRenderer_opengl.cpp
   )
+
+IF (STAR_ENABLE_OPENGL_RENDERER)
+  SET (star_application_HEADERS ${star_application_HEADERS}
+      StarRenderer_opengl.hpp
+    )
+  SET (star_application_SOURCES ${star_application_SOURCES}
+      StarRenderer_opengl.cpp
+    )
+ENDIF ()
+
+IF (STAR_ENABLE_VULKAN_RENDERER)
+  SET (star_application_HEADERS ${star_application_HEADERS}
+      StarRenderer_vulkan.hpp
+    )
+  SET (star_application_SOURCES ${star_application_SOURCES}
+      StarRenderer_vulkan.cpp
+    )
+ENDIF ()
 
 IF (STAR_ENABLE_STEAM_INTEGRATION)
   SET (star_application_HEADERS ${star_application_HEADERS}

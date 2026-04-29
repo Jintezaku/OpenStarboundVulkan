@@ -11,6 +11,12 @@ STAR_CLASS(InteractiveEntity);
 
 STAR_EXCEPTION(EntityMapException, StarException);
 
+enum class EntityIterationOrder {
+  Natural,
+  ByEntityType,
+  ByEntityId
+};
+
 // Class used by WorldServer and WorldClient to store entites organized in a
 // spatial hash.  Provides convenient ways of querying entities based on
 // different selection criteria.
@@ -45,6 +51,7 @@ public:
   // Iterates through the entity map optionally in the given order, updating
   // the spatial information for each entity along the way.
   void updateAllEntities(EntityCallback const& callback = {}, function<bool(EntityPtr const&, EntityPtr const&)> sortOrder = {});
+  void updateAllEntities(EntityCallback const& callback, EntityIterationOrder order);
 
   // If the given unique entity is in this map, then return its entity id
   EntityId uniqueEntityId(String const& uniqueId) const;
@@ -72,6 +79,7 @@ public:
 
   // Iterate through all the entities, optionally in the given sort order.
   void forAllEntities(EntityCallback const& callback, function<bool(EntityPtr const&, EntityPtr const&)> sortOrder = {}) const;
+  void forAllEntities(EntityCallback const& callback, EntityIterationOrder order) const;
 
   // Stops searching when filter returns true, and returns the entity which
   // caused it.
@@ -117,6 +125,17 @@ public:
 
 private:
   typedef SpatialHash2D<EntityId, float, EntityPtr> SpatialMap;
+  typedef SpatialMap::EntryMap::value_type SpatialMapEntry;
+
+  struct IterationSnapshot {
+    bool valid = false;
+    List<EntityId> entityIds;
+  };
+
+  void invalidateIterationSnapshots();
+  void updateEntityInfo(EntityId entityId, SpatialMap::Entry const& entry);
+  List<EntityId> buildEntitySnapshot(EntityIterationOrder order) const;
+  List<EntityId> const& entitySnapshot(EntityIterationOrder order) const;
 
   WorldGeometry m_geometry;
 
@@ -127,7 +146,9 @@ private:
   EntityId m_beginIdSpace;
   EntityId m_endIdSpace;
 
-  List<SpatialMap::Entry const*> m_entrySortBuffer;
+  mutable IterationSnapshot m_naturalIterationSnapshot;
+  mutable IterationSnapshot m_byTypeIterationSnapshot;
+  mutable IterationSnapshot m_byIdIterationSnapshot;
 };
 
 template <typename EntityT>

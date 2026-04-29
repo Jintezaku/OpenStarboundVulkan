@@ -4,11 +4,16 @@
 #include "StarConfiguration.hpp"
 #include "StarAssets.hpp"
 #include "StarJsonExtra.hpp"
+#include "StarTime.hpp"
 
 namespace Star {
 
 WorldPainter::WorldPainter() {
   m_assets = Root::singleton().assets();
+  m_reloadTracker = make_shared<TrackerListener>();
+  Root::singleton().registerReloadListener(m_reloadTracker);
+  m_nextCleanupTime = 0;
+  m_cacheCleanupInterval = 500;
 
   m_camera.setScreenSize({800, 600});
   m_camera.setCenterWorldPosition(Vec2F());
@@ -22,7 +27,7 @@ WorldPainter::WorldPainter() {
   m_entityBarSpacing = jsonToVec2F(m_assets->json("/rendering.config:entityBarSpacing"));
   m_entityBarSize = jsonToVec2F(m_assets->json("/rendering.config:entityBarSize"));
   m_entityBarIconOffset = jsonToVec2F(m_assets->json("/rendering.config:entityBarIconOffset"));
-  m_preloadTextureChance = m_assets->json("/rendering.config:preloadTextureChance").toFloat();
+  refreshRenderConfig();
 }
 
 void WorldPainter::renderInit(RendererPtr renderer) {
@@ -54,6 +59,8 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
   m_camera.setTargetPixelRatio(Root::singleton().configuration()->get("zoomLevel").toFloat());
 
   m_assets = Root::singleton().assets();
+  if (m_reloadTracker->pullTriggered())
+    refreshRenderConfig();
 
   m_tilePainter->setup(m_camera, renderData);
 
@@ -87,7 +94,7 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
       adjustLighting(renderData);
       m_renderer->setEffectTexture("lightMap", renderData.lightMap);
     }
-    m_renderer->setEffectParameter("lightMapMultiplier", m_assets->json("/rendering.config:lightMapMultiplier").toFloat());
+    m_renderer->setEffectParameter("lightMapMultiplier", m_lightMapMultiplier);
     m_renderer->setEffectParameter("lightMapScale", Vec2F::filled(TilePixels * m_camera.pixelRatio()));
     m_renderer->setEffectParameter("lightMapOffset", m_camera.worldToScreen(Vec2F(renderData.lightMinPosition)));
   }
@@ -155,20 +162,45 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
   if (dimLevel != 0)
     m_renderer->render(renderFlatRect(RectF::withSize({}, Vec2F(m_camera.screenSize())), Vec4B(renderData.dimColor, dimLevel), 0.0f));
 
-  int64_t textureTimeout = m_assets->json("/rendering.config:textureTimeout").toInt();
-  m_textPainter->cleanup(textureTimeout);
-  m_drawablePainter->cleanup(textureTimeout);
-  m_environmentPainter->cleanup(textureTimeout);
   m_tilePainter->cleanup();
+
+  int64_t now = Time::monotonicMilliseconds();
+  if (now >= m_nextCleanupTime) {
+    m_textPainter->cleanup(m_textureTimeout);
+    m_drawablePainter->cleanup(m_textureTimeout);
+    m_environmentPainter->cleanup(m_textureTimeout);
+    m_tilePainter->cleanupCache();
+    m_nextCleanupTime = now + m_cacheCleanupInterval;
+  }
 }
 
 void WorldPainter::adjustLighting(WorldRenderData& renderData) {
   m_tilePainter->adjustLighting(renderData);
 }
 
+void WorldPainter::refreshRenderConfig() {
+  auto renderingConfig = m_assets->json("/rendering.config");
+
+  float cacheRetentionMultiplier = renderingConfig.optFloat("cacheRetentionMultiplier").value(1.0f);
+  if (cacheRetentionMultiplier < 1.0f)
+    cacheRetentionMultiplier = 1.0f;
+
+  m_preloadTextureChance = renderingConfig.getFloat("preloadTextureChance");
+  m_lightMapMultiplier = renderingConfig.getFloat("lightMapMultiplier");
+  m_textParticleFontSize = renderingConfig.getInt("textParticleFontSize");
+  m_particleRenderWindowPadding = renderingConfig.getInt("particleRenderWindowPadding");
+
+  m_textureTimeout = (int64_t)(renderingConfig.getInt("textureTimeout") * cacheRetentionMultiplier);
+  if (m_textureTimeout < 1)
+    m_textureTimeout = 1;
+
+  m_cacheCleanupInterval = renderingConfig.optInt("cacheCleanupIntervalMs").value(500);
+  if (m_cacheCleanupInterval < 50)
+    m_cacheCleanupInterval = 50;
+}
+
 void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer layer) {
-  const int textParticleFontSize = m_assets->json("/rendering.config:textParticleFontSize").toInt();
-  const RectF particleRenderWindow = RectF::withSize(Vec2F(), Vec2F(m_camera.screenSize())).padded(m_assets->json("/rendering.config:particleRenderWindowPadding").toInt());
+  const RectF particleRenderWindow = RectF::withSize(Vec2F(), Vec2F(m_camera.screenSize())).padded(m_particleRenderWindowPadding);
 
   if (!renderData.particles)
     return;
@@ -225,7 +257,7 @@ void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer 
 
     } else if (particle.type == Particle::Type::Text) {
       Vec2F position = m_camera.worldToScreen(particle.position);
-      int size = min(128.0f, round((float)textParticleFontSize * m_camera.pixelRatio() * particle.size));
+      int size = min(128.0f, round((float)m_textParticleFontSize * m_camera.pixelRatio() * particle.size));
       if (size > 0) {
         m_textPainter->setFontSize(size);
         m_textPainter->setFontColor(particle.color.toRgba());

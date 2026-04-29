@@ -490,7 +490,8 @@ RectF TextPainter::doRenderGlyph(String::Char c, TextPositioning const& position
         shadow[3] = alphaU;
 
       Directives const* shadowDirectives = hasBackDirectives ? &m_renderSettings.backDirectives : directives;
-      renderGlyph(c, pos + Vec2F(0, -2), m_shadowPrimitives, m_renderSettings.fontSize, 1, shadow, shadowDirectives);
+      float shadowOffset = std::min(2.0f, std::max(1.0f, std::floor(2.0f * m_renderSettings.fontSize / (float)DefaultFontSize)));
+      renderGlyph(c, pos + Vec2F(0, -shadowOffset), m_shadowPrimitives, m_renderSettings.fontSize, 1, shadow, shadowDirectives);
     }
     if (hasBackDirectives)
       renderGlyph(c, pos, m_backPrimitives, m_renderSettings.fontSize, 1, m_renderSettings.color, &m_renderSettings.backDirectives);

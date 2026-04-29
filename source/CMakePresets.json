@@ -9,7 +9,10 @@
     {
       "name": "base",
       "hidden": true,
-      "architecture": { "value": "x64", "strategy": "external" },
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
       "generator": "Ninja",
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
@@ -18,6 +21,8 @@
         "VCPKG_OVERLAY_TRIPLETS": "${sourceParentDir}/triplets",
         "CMAKE_VERBOSE_MAKEFILE": true,
         "BUILD_TESTING": true,
+        "STAR_ENABLE_OPENGL_RENDERER": true,
+        "STAR_ENABLE_VULKAN_RENDERER": true,
         "STAR_ENABLE_STEAM_INTEGRATION": true,
         "STAR_ENABLE_DISCORD_INTEGRATION": true
       },
@@ -27,7 +32,14 @@
           "remoteSourceRootDir": "$env{HOME}/.vs/wsl",
           "copySourcesOptions": {
             "method": "rsync",
-            "exclusionList": [ ".vs", ".git", "out", "dist", "attic", "build" ]
+            "exclusionList": [
+              ".vs",
+              ".git",
+              "out",
+              "dist",
+              "attic",
+              "build"
+            ]
           }
         }
       }
@@ -48,7 +60,9 @@
       },
       "vendor": {
         "microsoft.com/VisualStudioSettings/CMake/1.0": {
-          "hostOS": [ "Windows" ]
+          "hostOS": [
+            "Windows"
+          ]
         }
       }
     },
@@ -74,7 +88,9 @@
       },
       "vendor": {
         "microsoft.com/VisualStudioSettings/CMake/1.0": {
-          "hostOS": [ "Linux" ]
+          "hostOS": [
+            "Linux"
+          ]
         },
         "microsoft.com/VisualStudioRemoteSettings/CMake/2.0": {
           "sourceRootDir": "$ms{localSourceDir}\\..",
@@ -87,7 +103,10 @@
       "name": "linux-arm-release",
       "displayName": "Linux ARM",
       "binaryDir": "${sourceParentDir}/build/linux-arm-release",
-      "architecture": { "value": "arm64", "strategy": "external" },
+      "architecture": {
+        "value": "arm64",
+        "strategy": "external"
+      },
       "cacheVariables": {
         "VCPKG_TARGET_TRIPLET": "arm64-linux-mixed",
         "STAR_ENABLE_STEAM_INTEGRATION": false,
@@ -120,6 +139,30 @@
       }
     },
     {
+      "inherits": "linux-release",
+      "name": "linux-vulkan-dev",
+      "displayName": "Linux Vulkan Dev",
+      "binaryDir": "${sourceParentDir}/build/linux-vulkan-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "STAR_ENABLE_VULKAN_RENDERER": true,
+        "STAR_ENABLE_OPENGL_RENDERER": true,
+        "STAR_ENABLE_IPO": true
+      }
+    },
+    {
+      "inherits": "linux-release",
+      "name": "linux-vulkan-dev-no-ipo",
+      "displayName": "Linux Vulkan Dev (No IPO)",
+      "binaryDir": "${sourceParentDir}/build/linux-vulkan-dev-no-ipo",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "STAR_ENABLE_VULKAN_RENDERER": true,
+        "STAR_ENABLE_OPENGL_RENDERER": true,
+        "STAR_ENABLE_IPO": false
+      }
+    },
+    {
       "inherits": "base",
       "name": "macos-release",
       "displayName": "macOS x64",
@@ -135,7 +178,9 @@
       },
       "vendor": {
         "microsoft.com/VisualStudioSettings/CMake/1.0": {
-          "hostOS": [ "macOS" ]
+          "hostOS": [
+            "macOS"
+          ]
         }
       }
     },
@@ -144,7 +189,10 @@
       "name": "macos-arm-release",
       "displayName": "macOS ARM",
       "binaryDir": "${sourceParentDir}/build/macos-arm-release",
-      "architecture": { "value": "arm64", "strategy": "external" },
+      "architecture": {
+        "value": "arm64",
+        "strategy": "external"
+      },
       "cacheVariables": {
         "VCPKG_TARGET_TRIPLET": "arm64-osx-mixed",
         "CMAKE_LIBRARY_PATH": "${sourceParentDir}/lib/osx/arm64;${sourceParentDir}/lib/osx"
@@ -187,6 +235,14 @@
       "configurePreset": "linux-arm-release-clang"
     },
     {
+      "name": "linux-vulkan-dev",
+      "configurePreset": "linux-vulkan-dev"
+    },
+    {
+      "name": "linux-vulkan-dev-no-ipo",
+      "configurePreset": "linux-vulkan-dev-no-ipo"
+    },
+    {
       "name": "macos-release",
       "configurePreset": "macos-release"
     },
@@ -199,8 +255,14 @@
     {
       "name": "base",
       "hidden": true,
-      "output": { "outputOnFailure": true },
-      "filter": { "include": { "label": "NoAssets" } }
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "NoAssets"
+        }
+      }
     },
     {
       "inherits": "base",
@@ -217,6 +279,16 @@
       "inherits": "base",
       "name": "linux-arm-release",
       "configurePreset": "linux-arm-release"
+    },
+    {
+      "inherits": "base",
+      "name": "linux-vulkan-dev",
+      "configurePreset": "linux-vulkan-dev"
+    },
+    {
+      "inherits": "base",
+      "name": "linux-vulkan-dev-no-ipo",
+      "configurePreset": "linux-vulkan-dev-no-ipo"
     },
     {
       "inherits": "base",

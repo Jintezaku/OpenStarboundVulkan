@@ -33,11 +33,17 @@ set(CMAKE_CONFIGURATION_TYPES Debug RelWithAsserts RelWithDebInfo Release)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 set(CMAKE_EXE_LINKER_FLAGS_RELWITHASSERTS "" CACHE STRING "" FORCE)
 
-#include(CheckIPOSupported)
-#check_ipo_supported(RESULT lto_supported OUTPUT lto_output)
-#if(lto_supported)
-#  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-#endif()
+option(STAR_ENABLE_IPO "Enable interprocedural optimization (LTO) when supported" OFF)
+if(STAR_ENABLE_IPO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT lto_supported OUTPUT lto_output)
+  if(lto_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    message(STATUS "IPO/LTO enabled")
+  else()
+    message(WARNING "IPO/LTO requested but not supported: ${lto_output}")
+  endif()
+endif()
 
 # Update the docstring on CMAKE_BUILD_TYPE to show what options we actually
 # allow
@@ -136,6 +142,8 @@ if(STAR_BUILD_GUI)
   option(STAR_BUILD_QT_TOOLS "Build GUI utilities that require Qt" OFF)
   option(STAR_ENABLE_STEAM_INTEGRATION "Use Steam platform services" OFF)
   option(STAR_ENABLE_DISCORD_INTEGRATION "Use Discord platform services" OFF)
+  option(STAR_ENABLE_OPENGL_RENDERER "Build OpenGL renderer backend" ON)
+  option(STAR_ENABLE_VULKAN_RENDERER "Build Vulkan renderer backend" ON)
 endif()
 
 option(STAR_LUA_APICHECK "Use lua api checks" OFF)
@@ -178,10 +186,19 @@ if(DEFINED STAR_ENABLE_DISCORD_INTEGRATION)
   message(STATUS "Using Discord platform services: ${STAR_ENABLE_DISCORD_INTEGRATION}")
 endif()
 
+if(DEFINED STAR_ENABLE_OPENGL_RENDERER)
+  message(STATUS "Building OpenGL renderer backend: ${STAR_ENABLE_OPENGL_RENDERER}")
+endif()
+
+if(DEFINED STAR_ENABLE_VULKAN_RENDERER)
+  message(STATUS "Building Vulkan renderer backend: ${STAR_ENABLE_VULKAN_RENDERER}")
+endif()
+
 message(STATUS "Using Lua API checks: ${STAR_LUA_APICHECK}")
 message(STATUS "Using jemalloc: ${STAR_USE_JEMALLOC}")
 message(STATUS "Using mimalloc: ${STAR_USE_MIMALLOC}")
 message(STATUS "Using rpmalloc: ${STAR_USE_RPMALLOC}")
+message(STATUS "Using IPO/LTO: ${STAR_ENABLE_IPO}")
 
 # Set C defines and cmake variables based on the build settings we have now
 # determined...
@@ -252,6 +269,14 @@ endif()
 
 if(STAR_ENABLE_DISCORD_INTEGRATION)
   add_definitions(-DSTAR_ENABLE_DISCORD_INTEGRATION)
+endif()
+
+if(DEFINED STAR_ENABLE_OPENGL_RENDERER AND STAR_ENABLE_OPENGL_RENDERER)
+  add_definitions(-DSTAR_ENABLE_OPENGL_RENDERER)
+endif()
+
+if(DEFINED STAR_ENABLE_VULKAN_RENDERER AND STAR_ENABLE_VULKAN_RENDERER)
+  add_definitions(-DSTAR_ENABLE_VULKAN_RENDERER)
 endif()
 
 if(STAR_USE_JEMALLOC)
@@ -525,6 +550,10 @@ if(STAR_SYSTEM_FAMILY STREQUAL "unix" AND NOT STAR_SYSTEM_HAIKU)
 endif()
 
 if(STAR_BUILD_GUI)
+  if(NOT STAR_ENABLE_OPENGL_RENDERER AND NOT STAR_ENABLE_VULKAN_RENDERER)
+    message(FATAL_ERROR "At least one renderer backend must be enabled when STAR_BUILD_GUI is ON")
+  endif()
+
   find_package(SDL3 CONFIG REQUIRED)
 
   set(STAR_EXT_GUI_LIBS
@@ -532,14 +561,21 @@ if(STAR_BUILD_GUI)
     $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>
   )
 
-  find_package(OpenGL REQUIRED)
-  find_package(GLEW REQUIRED)
+  if(STAR_ENABLE_OPENGL_RENDERER)
+    find_package(OpenGL REQUIRED)
+    find_package(GLEW REQUIRED)
 
-  include_directories(SYSTEM ${GLEW_INCLUDE_DIR})
-  set(STAR_EXT_GUI_LIBS ${STAR_EXT_GUI_LIBS}
-      ${OPENGL_LIBRARY}
-      $<IF:$<TARGET_EXISTS:GLEW::glew_s>,GLEW::glew_s,GLEW>
-  )
+    include_directories(SYSTEM ${GLEW_INCLUDE_DIR})
+    set(STAR_EXT_GUI_LIBS ${STAR_EXT_GUI_LIBS}
+        ${OPENGL_LIBRARY}
+        GLEW::glew_s
+    )
+  endif()
+
+  if(STAR_ENABLE_VULKAN_RENDERER)
+    find_package(Vulkan REQUIRED)
+    set(STAR_EXT_GUI_LIBS ${STAR_EXT_GUI_LIBS} Vulkan::Vulkan)
+  endif()
 
   if(STAR_SYSTEM_MACOS)
     set(STAR_EXT_GUI_LIBS ${STAR_EXT_GUI_LIBS} "-framework CoreAudio")
@@ -648,4 +684,3 @@ if(STAR_BUILD_GUI)
     endif()
   endif()
 endif()
-

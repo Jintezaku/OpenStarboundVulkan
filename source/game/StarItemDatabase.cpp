@@ -58,6 +58,26 @@ EnumMap<ItemType> ItemTypeNames{
   {ItemType::AugmentItem, "augmentitem"}
 };
 
+static Maybe<String> resolveModSourceIcon(String const& sourcePath) {
+  auto assets = Root::singleton().assets();
+
+  auto metadata = assets->assetSourceMetadata(sourcePath);
+  auto icon = metadata.ptr("icon");
+  if (!icon)
+    return {};
+
+  String iconPath = icon->toString();
+  if (iconPath.empty())
+    return {};
+  if (!iconPath.beginsWith("/"))
+    iconPath = "/" + iconPath;
+
+  if (!assets->assetExists(AssetPath::split(iconPath).basePath))
+    return {};
+
+  return iconPath;
+}
+
 uint64_t ItemDatabase::getCountOfItem(List<ItemPtr> const& bag, ItemDescriptor const& item, bool exactMatch) {
   auto normalizedBag = normalizeBag(bag);
   return getCountOfItem(normalizedBag, item, exactMatch);
@@ -201,6 +221,8 @@ ItemDatabase::ItemConfig ItemDatabase::itemConfig(String const& itemName, Json p
     itemConfig.config = Root::singleton().assets()->json(*data.assetsConfig);
   itemConfig.directory = data.directory;
   itemConfig.config = jsonMerge(itemConfig.config, data.customConfig);
+  if (data.modSourceIcon && !itemConfig.config.contains("modSourceIcon"))
+    itemConfig.config = itemConfig.config.set("modSourceIcon", *data.modSourceIcon);
   itemConfig.parameters = parameters;
 
   if (auto builder = itemConfig.config.optString("builder")) {
@@ -584,6 +606,7 @@ void ItemDatabase::addItemSet(ItemType type, String const& extension) {
       data.agingScripts = config.opt("itemAgingScripts").apply(jsonToStringList).value();
       data.directory = AssetPath::directory(file);
       data.filename = AssetPath::filename(file);
+      data.modSourceIcon = resolveModSourceIcon(assets->assetSource(file));
 
       data.agingScripts = data.agingScripts.transformed(bind(&AssetPath::relativeTo, data.directory, _1));
     } catch (std::exception const& e) {
@@ -606,6 +629,7 @@ void ItemDatabase::addObjectDropItem(String const& objectPath, Json const& objec
   data.friendlyName = objectConfig.getString("shortdescription", {});
   data.itemTags = objectConfig.opt("itemTags").apply(jsonToStringSet).value();
   data.agingScripts = objectConfig.opt("itemAgingScripts").apply(jsonToStringList).value();
+  data.modSourceIcon = resolveModSourceIcon(assets->assetSource(objectPath));
   data.directory = AssetPath::directory(objectPath);
   data.filename = AssetPath::filename(objectPath);
   JsonObject customConfig = objectConfig.toObject();
@@ -735,6 +759,7 @@ void ItemDatabase::addBlueprints() {
       configInfo["price"] = baseItem->price();
 
       blueprintData.customConfig = std::move(configInfo);
+      blueprintData.modSourceIcon = itemData(baseDesc.name()).modSourceIcon;
       blueprintData.directory = itemData(baseDesc.name()).directory;
 
       m_items[blueprintData.name] = blueprintData;
@@ -764,6 +789,7 @@ void ItemDatabase::addCodexes() {
       codexItemData.friendlyName = codexPair.second->title();
       codexItemData.directory = codexPair.second->directory();
       codexItemData.filename = codexPair.second->filename();
+      codexItemData.modSourceIcon = resolveModSourceIcon(assets->assetSource(codexItemData.directory + codexItemData.filename));
       auto customConfig = jsonMerge(codexConfig.get("defaultItemConfig"), codexPair.second->itemConfig()).toObject();
       customConfig["itemName"] = codexItemName;
       customConfig["codexId"] = codexPair.second->id();

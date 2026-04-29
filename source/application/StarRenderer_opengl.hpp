@@ -47,10 +47,10 @@ public:
 
   void flush(Mat3F const& transformation) override;
 
-  void setScreenSize(Vec2U screenSize);
+  void setScreenSize(Vec2U screenSize) override;
 
-  void startFrame();
-  void finishFrame();
+  void startFrame() override;
+  void finishFrame() override;
 
 private:
   struct GlTextureAtlasSet : public TextureAtlasSet<GLuint> {

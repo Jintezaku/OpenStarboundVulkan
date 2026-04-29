@@ -71,11 +71,14 @@ void EntityMap::addEntity(EntityPtr entity) {
   m_spatialMap.set(entityId, m_geometry.splitRect(boundBox, position), std::move(entity));
   if (uniqueId)
     m_uniqueMap.add(*uniqueId, entityId);
+
+  invalidateIterationSnapshots();
 }
 
 EntityPtr EntityMap::removeEntity(EntityId entityId) {
   if (auto entity = m_spatialMap.remove(entityId)) {
     m_uniqueMap.removeRight(entityId);
+    invalidateIterationSnapshots();
     return entity.take();
   }
   return {};
@@ -90,55 +93,46 @@ List<EntityId> EntityMap::entityIds() const {
 }
 
 void EntityMap::updateAllEntities(EntityCallback const& callback, function<bool(EntityPtr const&, EntityPtr const&)> sortOrder) {
-  auto updateEntityInfo = [&](SpatialMap::Entry const& entry) {
-    auto const& entity = entry.value;
+  if (!sortOrder)
+    return updateAllEntities(callback, EntityIterationOrder::Natural);
 
-    auto position = entity->position();
-    auto boundBox = entity->metaBoundBox();
-
-    if (boundBox.isNegative() || boundBox.width() > MaximumEntityBoundBox || boundBox.height() > MaximumEntityBoundBox) {
-      throw EntityMapException::format("Entity id: {} type: {} bound box is negative or beyond the maximum entity bound box size in EntityMap::addEntity",
-          entity->entityId(), (int)entity->entityType());
-    }
-
-    auto entityId = entity->entityId();
-    if (entityId == NullEntityId)
-      throw EntityMapException::format("Null entity id in EntityMap::setEntityInfo");
-
-    auto rects = m_geometry.splitRect(boundBox, position);
-    if (!containersEqual(rects, entry.rects))
-      m_spatialMap.set(entityId, rects);
-
-    auto uniqueId = entity->uniqueId();
-    if (uniqueId) {
-      if (auto existingEntityId = m_uniqueMap.maybeRight(*uniqueId)) {
-        if (entityId != *existingEntityId)
-          throw EntityMapException::format("Duplicate entity unique id on entity ids ({}) and ({})", *existingEntityId, entityId);
-      } else {
-        m_uniqueMap.removeRight(entityId);
-        m_uniqueMap.add(*uniqueId, entityId);
-      }
-    } else {
-      m_uniqueMap.removeRight(entityId);
-    }
-  };
-
-  // Even if there is no sort order, we still copy pointers to a temporary
-  // list, so that it is safe to call addEntity from the callback.
-  m_entrySortBuffer.clear();
+  List<SpatialMapEntry const*> sortedEntries;
+  sortedEntries.reserve(m_spatialMap.size());
   for (auto const& entry : m_spatialMap.entries())
-    m_entrySortBuffer.append(&entry.second);
+    sortedEntries.append(&entry);
 
-  if (sortOrder) {
-    m_entrySortBuffer.sort([&sortOrder](auto a, auto b) {
-        return sortOrder(a->value, b->value);
-      });
-  }
+  sortedEntries.sort([&sortOrder](SpatialMapEntry const* a, SpatialMapEntry const* b) {
+      return sortOrder(a->second.value, b->second.value);
+    });
 
-  for (auto entry : m_entrySortBuffer) {
+  for (auto sortedEntry : sortedEntries) {
+    auto entry = m_spatialMap.entries().ptr(sortedEntry->first);
+    if (!entry)
+      continue;
+
+    auto const& entity = entry->value;
+    if (!entity)
+      continue;
+
     if (callback)
-      callback(entry->value);
-    updateEntityInfo(*entry);
+      callback(entity);
+    updateEntityInfo(sortedEntry->first, *entry);
+  }
+}
+
+void EntityMap::updateAllEntities(EntityCallback const& callback, EntityIterationOrder order) {
+  for (auto entityId : entitySnapshot(order)) {
+    auto entry = m_spatialMap.entries().ptr(entityId);
+    if (!entry)
+      continue;
+
+    auto const& entity = entry->value;
+    if (!entity)
+      continue;
+
+    if (callback)
+      callback(entity);
+    updateEntityInfo(entityId, *entry);
   }
 }
 
@@ -207,21 +201,27 @@ void EntityMap::forEachEntityAtTile(Vec2I const& pos, EntityCallbackOf<TileEntit
 }
 
 void EntityMap::forAllEntities(EntityCallback const& callback, function<bool(EntityPtr const&, EntityPtr const&)> sortOrder) const {
-  // Even if there is no sort order, we still copy pointers to a temporary
-  // list, so that it is safe to call addEntity from the callback.
-  List<EntityPtr const*> allEntities;
-  allEntities.reserve(m_spatialMap.size());
+  if (!sortOrder)
+    return forAllEntities(callback, EntityIterationOrder::Natural);
+
+  List<SpatialMapEntry const*> sortedEntries;
+  sortedEntries.reserve(m_spatialMap.size());
   for (auto const& entry : m_spatialMap.entries())
-    allEntities.append(&entry.second.value);
+    sortedEntries.append(&entry);
 
-  if (sortOrder) {
-    allEntities.sort([&sortOrder](EntityPtr const* a, EntityPtr const* b) {
-        return sortOrder(*a, *b);
-      });
-  }
+  sortedEntries.sort([&sortOrder](SpatialMapEntry const* a, SpatialMapEntry const* b) {
+      return sortOrder(a->second.value, b->second.value);
+    });
 
-  for (auto ptr : allEntities) {
-    auto& entity = *ptr;
+  for (auto sortedEntry : sortedEntries) {
+    auto entry = m_spatialMap.entries().ptr(sortedEntry->first);
+    if (!entry)
+      continue;
+
+    auto const& entity = entry->value;
+    if (!entity)
+      continue;
+
     try {
       callback(entity);
     } catch (...) {
@@ -233,6 +233,124 @@ void EntityMap::forAllEntities(EntityCallback const& callback, function<bool(Ent
       throw;
     }
   }
+}
+
+void EntityMap::forAllEntities(EntityCallback const& callback, EntityIterationOrder order) const {
+  if (!callback)
+    return;
+
+  for (auto entityId : entitySnapshot(order)) {
+    auto entry = m_spatialMap.entries().ptr(entityId);
+    if (!entry)
+      continue;
+
+    auto const& entity = entry->value;
+    if (!entity)
+      continue;
+
+    try {
+      callback(entity);
+    } catch (...) {
+      Logger::error("[EntityMap] Exception caught running forAllEntities callback for {} entity {} (named \"{}\")",
+        EntityTypeNames.getRight(entity->entityType()),
+        entity->entityId(),
+        entity->name()
+      );
+      throw;
+    }
+  }
+}
+
+void EntityMap::invalidateIterationSnapshots() {
+  m_naturalIterationSnapshot.valid = false;
+  m_byTypeIterationSnapshot.valid = false;
+  m_byIdIterationSnapshot.valid = false;
+}
+
+void EntityMap::updateEntityInfo(EntityId entityId, SpatialMap::Entry const& entry) {
+  auto const& entity = entry.value;
+
+  auto position = entity->position();
+  auto boundBox = entity->metaBoundBox();
+
+  if (boundBox.isNegative() || boundBox.width() > MaximumEntityBoundBox || boundBox.height() > MaximumEntityBoundBox) {
+    throw EntityMapException::format("Entity id: {} type: {} bound box is negative or beyond the maximum entity bound box size in EntityMap::addEntity",
+        entity->entityId(), (int)entity->entityType());
+  }
+
+  if (entityId == NullEntityId)
+    throw EntityMapException::format("Null entity id in EntityMap::setEntityInfo");
+
+  auto rects = m_geometry.splitRect(boundBox, position);
+  if (!containersEqual(rects, entry.rects))
+    m_spatialMap.set(entityId, rects);
+
+  auto uniqueId = entity->uniqueId();
+  if (uniqueId) {
+    if (auto existingEntityId = m_uniqueMap.maybeRight(*uniqueId)) {
+      if (entityId != *existingEntityId)
+        throw EntityMapException::format("Duplicate entity unique id on entity ids ({}) and ({})", *existingEntityId, entityId);
+    } else {
+      m_uniqueMap.removeRight(entityId);
+      m_uniqueMap.add(*uniqueId, entityId);
+    }
+  } else {
+    m_uniqueMap.removeRight(entityId);
+  }
+}
+
+List<EntityId> EntityMap::buildEntitySnapshot(EntityIterationOrder order) const {
+  List<EntityId> entityIds;
+  if (order == EntityIterationOrder::ByEntityType) {
+    List<pair<EntityId, EntityType>> entitySortKeys;
+    entitySortKeys.reserve(m_spatialMap.size());
+    for (auto const& entry : m_spatialMap.entries())
+      entitySortKeys.append({entry.first, entry.second.value->entityType()});
+
+    entitySortKeys.sort([](pair<EntityId, EntityType> const& a, pair<EntityId, EntityType> const& b) {
+        if (a.second != b.second)
+          return a.second < b.second;
+        return a.first < b.first;
+      });
+
+    entityIds.reserve(entitySortKeys.size());
+    for (auto const& entry : entitySortKeys)
+      entityIds.append(entry.first);
+  } else if (order == EntityIterationOrder::ByEntityId) {
+    entityIds.reserve(m_spatialMap.size());
+    for (auto const& entry : m_spatialMap.entries())
+      entityIds.append(entry.first);
+    entityIds.sort();
+  } else {
+    entityIds.reserve(m_spatialMap.size());
+    for (auto const& entry : m_spatialMap.entries())
+      entityIds.append(entry.first);
+  }
+
+  return entityIds;
+}
+
+List<EntityId> const& EntityMap::entitySnapshot(EntityIterationOrder order) const {
+  IterationSnapshot* snapshot = nullptr;
+  switch (order) {
+  case EntityIterationOrder::Natural:
+    snapshot = &m_naturalIterationSnapshot;
+    break;
+  case EntityIterationOrder::ByEntityType:
+    snapshot = &m_byTypeIterationSnapshot;
+    break;
+  case EntityIterationOrder::ByEntityId:
+    snapshot = &m_byIdIterationSnapshot;
+    break;
+  }
+
+  starAssert(snapshot);
+  if (!snapshot->valid) {
+    snapshot->entityIds = buildEntitySnapshot(order);
+    snapshot->valid = true;
+  }
+
+  return snapshot->entityIds;
 }
 
 EntityPtr EntityMap::findEntity(RectF const& boundBox, EntityFilter const& filter) const {

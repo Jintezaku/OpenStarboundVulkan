@@ -6,6 +6,7 @@
 #include "StarRenderer.hpp"
 #include "StarWorldCamera.hpp"
 #include "StarTileDrawer.hpp"
+#include "StarListener.hpp"
 
 namespace Star {
 
@@ -42,9 +43,9 @@ public:
   void renderLiquid(WorldCamera const& camera);
   void renderForeground(WorldCamera const& camera);
 
-  // Clears any render data, as well as cleaning up old cached textures and
-  // chunks.
+  // Clears frame-local render data.
   void cleanup();
+  void cleanupCache();
 
 private:
   typedef uint64_t QuadZLevel;
@@ -87,6 +88,7 @@ private:
   void produceLiquidPrimitives(HashMap<LiquidId, List<RenderPrimitive>>& primitives, Vec2I const& pos, WorldRenderData const& renderData);
 
   float liquidDrawLevel(float liquidLevel) const;
+  void refreshRenderConfig();
 
   List<LiquidInfo> m_liquids;
 
@@ -97,11 +99,17 @@ private:
   HashTtlCache<pair<Vec2I, ChunkHash>, shared_ptr<TerrainChunk const>> m_terrainChunkCache;
   HashTtlCache<pair<Vec2I, ChunkHash>, shared_ptr<LiquidChunk const>> m_liquidChunkCache;
 
-  List<shared_ptr<TerrainChunk const>> m_pendingTerrainChunks;
-  List<shared_ptr<LiquidChunk const>> m_pendingLiquidChunks;
+  List<RenderBufferPtr> m_backgroundTerrainBuffers;
+  List<RenderBufferPtr> m_midgroundTerrainBuffers;
+  List<RenderBufferPtr> m_foregroundTerrainBuffers;
+  List<RenderBufferPtr> m_liquidBuffers;
+
+  Mat3F m_cameraTransformation;
 
   Maybe<Vec2F> m_lastCameraCenter;
   Vec2F m_cameraPan;
+
+  TrackerListenerPtr m_reloadTracker;
 };
 
 }

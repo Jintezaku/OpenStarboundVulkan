@@ -196,6 +196,23 @@ void ItemSlotWidget::renderImpl() {
     int frame = (int)roundf(m_progress * 18);// TODO: Hardcoded lol
     context()->drawInterfaceQuad(String(strf("/interface/cooldown.png:{}", frame)), Vec2F(screenPosition()));
   };
+  auto drawModSourceIcon = [this]() {
+    if (!m_item)
+      return;
+
+    if (auto modSourceIcon = m_item->modSourceIcon()) {
+      auto iconSize = Root::singleton().imageMetadataDatabase()->imageSize(*modSourceIcon);
+      if (iconSize[0] == 0 || iconSize[1] == 0)
+        return;
+
+      constexpr float TargetModIconSize = 6.0f;
+      float iconScale = TargetModIconSize / std::max(iconSize[0], iconSize[1]);
+      Vec2F scaledIconSize = Vec2F(iconSize) * iconScale;
+      Vec2F iconPosition = Vec2F(screenPosition()) + Vec2F(size()[0] - scaledIconSize[0] - 1.0f, 1.0f);
+
+      context()->drawInterfaceQuad(*modSourceIcon, iconPosition, iconScale);
+    }
+  };
   if (m_item) {
     if (m_drawBackingImageWhenFull && m_backingImage != "")
       context()->drawInterfaceQuad(m_backingImage, Vec2F(screenPosition()));
@@ -214,6 +231,7 @@ void ItemSlotWidget::renderImpl() {
 
     for (auto i : iconDrawables)
       context()->drawInterfaceDrawable(i, Vec2F(screenPosition() + size() / 2));
+    drawModSourceIcon();
 
     if (!m_newItemIndicator.isComplete())
       context()->drawInterfaceDrawable(m_newItemIndicator.drawable(1.0), Vec2F(screenPosition() + size() / 2), Color::White.toRgba());

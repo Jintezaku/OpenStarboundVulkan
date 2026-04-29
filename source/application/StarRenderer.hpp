@@ -128,6 +128,7 @@ public:
 
   virtual String rendererId() const = 0;
   virtual Vec2U screenSize() const = 0;
+  virtual void setScreenSize(Vec2U screenSize) = 0;
 
   virtual void loadConfig(Json const& config) = 0;
 
@@ -165,6 +166,10 @@ public:
   virtual void renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F const& transformation = Mat3F::identity()) = 0;
 
   virtual void flush(Mat3F const& transformation = Mat3F::identity()) = 0;
+
+  // Called at the beginning/end of a frame by platform code.
+  virtual void startFrame() = 0;
+  virtual void finishFrame() = 0;
 };
 
 }

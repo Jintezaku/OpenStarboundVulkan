@@ -27,6 +27,7 @@ public:
   void setTextCharLimit(Maybe<unsigned> charLimit);
   void setTextStyle(TextStyle const& style);
 
+  Vec2I size() const override;
   RectI relativeBoundRect() const override;
 
 protected:
@@ -34,6 +35,7 @@ protected:
   virtual void renderImpl() override;
 
 private:
+  void refreshTextRegionIfNeeded();
   void updateTextRegion();
 
   String m_text;
@@ -44,6 +46,7 @@ private:
   Maybe<float> m_lineSpacing;
   Maybe<unsigned> m_textCharLimit;
   RectI m_textRegion;
+  float m_interfaceScale = -1.0f;
 };
 
 }

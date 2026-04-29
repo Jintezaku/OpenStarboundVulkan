@@ -1,8 +1,8 @@
 #include "StarMainApplication.hpp"
 #include "StarLogging.hpp"
+#include "StarRendererFactory.hpp"
 #include "StarSignalHandler.hpp"
 #include "StarTickRateMonitor.hpp"
-#include "StarRenderer_opengl.hpp"
 #include "StarTtlCache.hpp"
 #include "StarImage.hpp"
 #include "StarImageProcessing.hpp"
@@ -16,9 +16,13 @@
 #include <ShlObj_core.h>
 #endif
 
+#include <cstdlib>
+
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
+#ifdef STAR_ENABLE_OPENGL_RENDERER
 #include "imgui_impl_opengl3.h"
+#endif
 
 namespace Star {
 
@@ -438,6 +442,33 @@ ControllerButton controllerButtonFromSdlControllerButton(uint8_t button) {
   }
 }
 
+static Maybe<String> pullRendererBackendArgument(StringList& cmdLineArgs) {
+  Maybe<String> requestedRendererBackend;
+  eraseWhere(cmdLineArgs, [&requestedRendererBackend](String& argument) {
+      for (auto const& prefix : {"+rendererBackend=", "+renderer=", "+rendererBackend:", "+renderer:"}) {
+        if (argument.beginsWith(prefix)) {
+          auto splitToken = String(prefix).contains("=") ? '=' : ':';
+          auto parts = argument.split(splitToken, 1);
+          if (parts.size() != 2 || parts[1].empty())
+            throw ApplicationException::format("Renderer backend argument '{}' has no backend name", argument);
+
+          requestedRendererBackend = std::move(parts[1]);
+          return true;
+        }
+      }
+      return false;
+    });
+  return requestedRendererBackend;
+}
+
+static Maybe<String> rendererBackendFromEnvironment() {
+  if (auto envRequestedBackend = getenv("STAR_RENDERER_BACKEND")) {
+    if (envRequestedBackend[0] != '\0')
+      return String(envRequestedBackend);
+  }
+  return {};
+}
+
 class SdlPlatform {
 public:
   SdlPlatform(ApplicationUPtr application, StringList cmdLineArgs) {
@@ -455,6 +486,29 @@ public:
         }
         return false;
       });
+
+    auto requestedRendererBackendName = pullRendererBackendArgument(cmdLineArgs);
+    if (!requestedRendererBackendName)
+      requestedRendererBackendName = rendererBackendFromEnvironment();
+
+    if (requestedRendererBackendName) {
+      auto normalizedBackendName = requestedRendererBackendName->trim().toLower();
+      m_requestedRendererBackend = rendererBackendFromString(normalizedBackendName);
+
+      if (m_requestedRendererBackend == RendererBackend::Auto && normalizedBackendName != "auto") {
+        Logger::warn("Application: Unrecognized renderer backend '{}', defaulting to '{}'",
+            normalizedBackendName,
+            RendererBackendNames.getRight(RendererBackend::Auto));
+      }
+    }
+
+    m_selectedRendererBackend = resolveRendererBackend(m_requestedRendererBackend);
+    m_rendererUsesOpenGlContext = rendererBackendUsesOpenGlContext(m_selectedRendererBackend);
+    m_rendererUsesVulkanSurface = rendererBackendUsesVulkanSurface(m_selectedRendererBackend);
+
+    Logger::info("Application: requested renderer backend '{}', selected '{}'",
+        RendererBackendNames.getRight(m_requestedRendererBackend),
+        RendererBackendNames.getRight(m_selectedRendererBackend));
 
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, "OpenStarbound");
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_IDENTIFIER_STRING, "io.github.openstarbound.openstarbound");
@@ -507,10 +561,15 @@ public:
       Logger::info("Application: No platform services available");
 
     Logger::info("Application: Creating SDL window");
+    Uint64 windowFlags = SDL_WINDOW_RESIZABLE;
+    if (m_rendererUsesOpenGlContext)
+      windowFlags |= SDL_WINDOW_OPENGL;
+    if (m_rendererUsesVulkanSurface)
+      windowFlags |= SDL_WINDOW_VULKAN;
 #ifdef STAR_SYSTEM_MACOS
-    m_sdlWindow = SDL_CreateWindow(m_windowTitle.utf8Ptr(), m_windowSize[0], m_windowSize[1], SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    m_sdlWindow = SDL_CreateWindow(m_windowTitle.utf8Ptr(), m_windowSize[0], m_windowSize[1], windowFlags);
 #else
-    m_sdlWindow = SDL_CreateWindow(m_windowTitle.utf8Ptr(), m_windowSize[0], m_windowSize[1], SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    m_sdlWindow = SDL_CreateWindow(m_windowTitle.utf8Ptr(), m_windowSize[0], m_windowSize[1], windowFlags | SDL_WINDOW_HIGH_PIXEL_DENSITY);
 #endif
     if (!m_sdlWindow)
       throw ApplicationException::format("Application: Could not create SDL Window: {}", SDL_GetError());
@@ -579,26 +638,34 @@ public:
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "Audio");
 #endif
 
+    char const* glslVersion = nullptr;
+    if (m_rendererUsesOpenGlContext) {
 #if defined(__APPLE__)
-    // GL 3.2 Core + GLSL 150
-    const char* glsl_version = "#version 150";
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG); // Always required on Mac
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+      // GL 3.2 Core + GLSL 150
+      glslVersion = "#version 150";
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG); // Always required on Mac
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
 #else
-    // GL 3.0 + GLSL 130
-    const char* glsl_version = "#version 130";
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+      // GL 3.0 + GLSL 130
+      glslVersion = "#version 130";
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #endif
 
-    Logger::info("Application: Creating SDL OpenGL context");
-    m_sdlGlContext = SDL_GL_CreateContext(m_sdlWindow);
-    if (!m_sdlGlContext)
-      throw ApplicationException::format("Application: Could not create OpenGL context: {}", SDL_GetError());
+      Logger::info("Application: Creating SDL OpenGL context");
+      m_sdlGlContext = SDL_GL_CreateContext(m_sdlWindow);
+      if (!m_sdlGlContext)
+        throw ApplicationException::format("Application: Could not create OpenGL context: {}", SDL_GetError());
+    } else if (m_rendererUsesVulkanSurface) {
+      Logger::info("Application: Using SDL Vulkan window mode");
+    } else {
+      throw ApplicationException::format("Renderer backend '{}' selected but SDL platform setup is not implemented for it yet",
+          RendererBackendNames.getRight(m_selectedRendererBackend));
+    }
 
     SDL_ShowWindow(m_sdlWindow);
     SDL_RaiseWindow(m_sdlWindow);
@@ -608,8 +675,10 @@ public:
     SDL_GetWindowSize(m_sdlWindow, &width, &height);
     m_windowSize = Vec2U(width, height);
 
-    SDL_GL_SwapWindow(m_sdlWindow);
-    setVSyncEnabled(m_windowVSync);
+    if (m_rendererUsesOpenGlContext) {
+      SDL_GL_SwapWindow(m_sdlWindow);
+      setVSyncEnabled(m_windowVSync);
+    }
 
     SDL_StopTextInput(m_sdlWindow);
 
@@ -632,7 +701,7 @@ public:
       SDL_ResumeAudioDevice(SDL_GetAudioStreamDevice(m_sdlAudioOutputStream));
     }
 
-    m_renderer = make_shared<OpenGlRenderer>();
+    m_renderer = createRenderer(m_selectedRendererBackend, m_sdlWindow);
     m_renderer->setScreenSize(m_windowSize);
 
     m_cursorCache.setTimeToLive(30000);
@@ -647,8 +716,21 @@ public:
     float main_scale = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
     style.ScaleAllSizes(main_scale);
 
-    ImGui_ImplSDL3_InitForOpenGL(m_sdlWindow, m_sdlGlContext);
-    ImGui_ImplOpenGL3_Init(glsl_version);
+    if (m_rendererUsesOpenGlContext) {
+      ImGui_ImplSDL3_InitForOpenGL(m_sdlWindow, m_sdlGlContext);
+      m_imguiSdlInitialized = true;
+
+#ifdef STAR_ENABLE_OPENGL_RENDERER
+      ImGui_ImplOpenGL3_Init(glslVersion);
+      m_imguiOpenGlInitialized = true;
+#endif
+    } else if (m_rendererUsesVulkanSurface) {
+      ImGui_ImplSDL3_InitForVulkan(m_sdlWindow);
+      m_imguiSdlInitialized = true;
+    } else {
+      ImGui_ImplSDL3_InitForOther(m_sdlWindow);
+      m_imguiSdlInitialized = true;
+    }
 
   }
 
@@ -661,12 +743,17 @@ public:
 
     m_renderer.reset();
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL3_Shutdown();
+#ifdef STAR_ENABLE_OPENGL_RENDERER
+    if (m_imguiOpenGlInitialized)
+      ImGui_ImplOpenGL3_Shutdown();
+#endif
+    if (m_imguiSdlInitialized)
+      ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
     Logger::info("Application: Destroying SDL Window");
-    SDL_GL_DestroyContext(m_sdlGlContext);
+    if (m_sdlGlContext)
+      SDL_GL_DestroyContext(m_sdlGlContext);
     SDL_DestroyWindow(m_sdlWindow);
 
     SDL_Quit();
@@ -742,8 +829,12 @@ public:
           SDL_HideCursor();
 
 
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplSDL3_NewFrame();
+#ifdef STAR_ENABLE_OPENGL_RENDERER
+        if (m_imguiOpenGlInitialized)
+          ImGui_ImplOpenGL3_NewFrame();
+#endif
+        if (m_imguiSdlInitialized)
+          ImGui_ImplSDL3_NewFrame();
 
         int updatesBehind = max<int>(round(m_updateTicker.ticksBehind()), 1);
         updatesBehind = min<int>(updatesBehind, m_maxFrameSkip + 1);
@@ -761,8 +852,12 @@ public:
         m_renderer->finishFrame();
 
         ImGui::Render();
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        SDL_GL_SwapWindow(m_sdlWindow);
+#ifdef STAR_ENABLE_OPENGL_RENDERER
+        if (m_imguiOpenGlInitialized)
+          ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
+        if (m_rendererUsesOpenGlContext)
+          SDL_GL_SwapWindow(m_sdlWindow);
         m_renderRate = m_renderTicker.tick();
 
         if (m_quitRequested) {
@@ -1087,7 +1182,8 @@ private:
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       SDL_ConvertEventToRenderCoordinates(SDL_GetRenderer(m_sdlWindow), &event);
-      ImGui_ImplSDL3_ProcessEvent(&event);
+      if (m_imguiSdlInitialized)
+        ImGui_ImplSDL3_ProcessEvent(&event);
       Maybe<InputEvent> starEvent;
       if (event.type == SDL_EVENT_WINDOW_MAXIMIZED || event.type == SDL_EVENT_WINDOW_RESTORED) {
         auto windowFlags = SDL_GetWindowFlags(m_sdlWindow);
@@ -1184,6 +1280,12 @@ private:
   }
 
   void setVSyncEnabled(bool vsyncEnabled) {
+    if (!m_rendererUsesOpenGlContext) {
+      Logger::warn("Application: VSync toggle requested, but backend '{}' does not use SDL OpenGL swap interval control",
+          RendererBackendNames.getRight(m_selectedRendererBackend));
+      return;
+    }
+
     if (vsyncEnabled) {
       // If VSync is requested, try for late swap tearing first, then fall back
       // to regular VSync
@@ -1360,10 +1462,16 @@ private:
   bool m_audioEnabled = false;
   bool m_quitRequested = false;
   float m_displayScale = 1.0f;
+  RendererBackend m_requestedRendererBackend = RendererBackend::Auto;
+  RendererBackend m_selectedRendererBackend = RendererBackend::OpenGL;
+  bool m_rendererUsesOpenGlContext = true;
+  bool m_rendererUsesVulkanSurface = false;
+  bool m_imguiSdlInitialized = false;
+  bool m_imguiOpenGlInitialized = false;
   const char* m_videoDriver;
   const char* m_audioDriver;
 
-  OpenGlRendererPtr m_renderer;
+  RendererPtr m_renderer;
   ApplicationUPtr m_application;
   PcPlatformServicesUPtr m_platformServices;
 };

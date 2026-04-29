@@ -73,6 +73,7 @@ private:
   };
 
   void renderReload();
+  void refreshInterfaceScale();
 
   void changeState(MainAppState newState);
   void setError(String const& error);

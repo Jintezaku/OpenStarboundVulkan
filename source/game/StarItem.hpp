@@ -95,6 +95,7 @@ public:
 
   bool twoHanded() const;
   float timeToLive() const;
+  Maybe<String> modSourceIcon() const;
 
   List<ItemDescriptor> learnBlueprintsOnPickup() const;
   StringMap<String> collectablesOnPickup() const;
@@ -157,6 +158,7 @@ private:
   String m_largeImage;
   String m_category;
   StringSet m_pickupSounds;
+  Maybe<String> m_modSourceIcon;
 
   List<ItemDescriptor> m_matchingDescriptors;
   List<ItemDescriptor> m_learnBlueprintsOnPickup;
