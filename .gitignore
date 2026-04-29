@@ -52,10 +52,14 @@ _deps
 # AI assistant files
 **/.agents/
 **/.codex/
+**/.codex-plugin/
 **/.prompts/
+**/starbound-vulkan-dev/
 *.instructions.md
 *.prompt.md
 *.agent.md
 *.skill.md
 copilot-instructions.md
+source/docs/vulkan-dev.md
+source/docs/vulkan-renderer-config.md
 AGENTS.md
