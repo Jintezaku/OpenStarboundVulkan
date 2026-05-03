@@ -143,8 +143,10 @@ private:
   bool m_enableVisibleChunkPriority;
   int m_criticalChunkSyncBuildsPerFrame;
   bool m_enableChunkPrefetch;
+  bool m_enableAdaptiveChunkPrefetchCadence;
   int m_chunkPrefetchRing;
   int m_chunkPrefetchPerFrame;
+  int m_chunkPrefetchMinPerFrame;
   uint64_t m_setupFrameIndex;
   Maybe<uint64_t> m_cachedWorldRenderGeneration;
   Maybe<Vec2U> m_cachedWorldSize;

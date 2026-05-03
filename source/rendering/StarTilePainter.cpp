@@ -46,8 +46,10 @@ TilePainter::TilePainter(RendererPtr renderer) : TileDrawer() {
   m_enableVisibleChunkPriority = true;
   m_criticalChunkSyncBuildsPerFrame = 2;
   m_enableChunkPrefetch = true;
+  m_enableAdaptiveChunkPrefetchCadence = true;
   m_chunkPrefetchRing = 1;
   m_chunkPrefetchPerFrame = 16;
+  m_chunkPrefetchMinPerFrame = 2;
   m_setupFrameIndex = 0;
   refreshRenderConfig();
 
@@ -278,7 +280,14 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
     }
   }
 
-  if (m_enableChunkPrefetch && m_chunkPrefetchRing > 0 && m_chunkPrefetchPerFrame > 0
+  int prefetchPerFrame = m_chunkPrefetchPerFrame;
+  if (m_enableAdaptiveChunkPrefetchCadence && prefetchPerFrame > 0) {
+    double prefetchScale = 1.0 - (overload * 0.8);
+    int scaledPrefetch = (int)std::lround((double)prefetchPerFrame * prefetchScale);
+    prefetchPerFrame = std::max(m_chunkPrefetchMinPerFrame, scaledPrefetch);
+  }
+
+  if (m_enableChunkPrefetch && m_chunkPrefetchRing > 0 && prefetchPerFrame > 0
       && (terrainBudgetMicros > 0 || liquidBudgetMicros > 0)) {
     RectI prefetchRange = chunkRange.padded(m_chunkPrefetchRing);
     List<Vec2I> prefetchOrder;
@@ -305,7 +314,7 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
 
     int prefetched = 0;
     for (auto const& chunkIndex : prefetchOrder) {
-      if (prefetched >= m_chunkPrefetchPerFrame)
+      if (prefetched >= prefetchPerFrame)
         break;
       if (terrainBudgetMicros <= 0 && liquidBudgetMicros <= 0)
         break;
@@ -490,10 +499,15 @@ void TilePainter::refreshRenderConfig() {
   m_criticalChunkSyncBuildsPerFrame = (int)std::clamp<uint64_t>(
       renderingConfig.optUInt("criticalChunkSyncBuildsPerFrame").value(2), 0, 128);
   m_enableChunkPrefetch = renderingConfig.optBool("chunkPrefetchEnabled").value(true);
+  m_enableAdaptiveChunkPrefetchCadence = renderingConfig.optBool("chunkPrefetchAdaptiveCadenceEnabled").value(true);
   m_chunkPrefetchRing = (int)std::clamp<uint64_t>(
       renderingConfig.optUInt("chunkPrefetchRing").value(1), 0, 8);
   m_chunkPrefetchPerFrame = (int)std::clamp<uint64_t>(
       renderingConfig.optUInt("chunkPrefetchPerFrame").value(16), 0, 256);
+  m_chunkPrefetchMinPerFrame = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("chunkPrefetchMinPerFrame").value(2), 0, 256);
+  if (m_chunkPrefetchMinPerFrame > m_chunkPrefetchPerFrame)
+    m_chunkPrefetchMinPerFrame = m_chunkPrefetchPerFrame;
 }
 
 size_t TilePainter::TextureKeyHash::operator()(TextureKey const& key) const {
