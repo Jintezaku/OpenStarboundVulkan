@@ -28,6 +28,7 @@ struct PcPlatformServicesState {
   STEAM_CALLBACK(PcPlatformServicesState, onGameOverlayActivated, GameOverlayActivated_t, callbackGameOverlayActivated);
 
   bool steamAvailable = false;
+  bool steamCallbacksEnabled = true;
 #endif
 
 #ifdef STAR_ENABLE_DISCORD_INTEGRATION

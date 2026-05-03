@@ -7,6 +7,11 @@
 #include "StarAssets.hpp"
 #include "StarRoot.hpp"
 #include "StarTileDrawer.hpp"
+#include "StarSet.hpp"
+#include "StarTime.hpp"
+
+#include <algorithm>
+#include <limits>
 
 namespace Star {
 
@@ -19,6 +24,21 @@ TilePainter::TilePainter(RendererPtr renderer) : TileDrawer() {
 
   m_reloadTracker = make_shared<TrackerListener>();
   root.registerReloadListener(m_reloadTracker);
+  m_terrainDamageHashLevelQuantization = 16;
+  m_liquidHashLevelQuantization = 32;
+  m_enableAdaptiveChunkBuildBudget = true;
+  m_baseTerrainChunkBuildBudgetMicros = 3000;
+  m_baseLiquidChunkBuildBudgetMicros = 1500;
+  m_minTerrainChunkBuildBudgetMicros = 500;
+  m_minLiquidChunkBuildBudgetMicros = 250;
+  m_chunkBuildBudgetOverloadStartMs = 6.0;
+  m_chunkBuildBudgetOverloadMaxMs = 18.0;
+  m_setupCostEmaMs = 0.0;
+  m_setupCostSmoothing = 0.15;
+  m_enableAdaptiveChunkHashCadence = true;
+  m_chunkHashRefreshBaseStrideFrames = 1;
+  m_chunkHashRefreshMaxStrideFrames = 4;
+  m_setupFrameIndex = 0;
   refreshRenderConfig();
 
   for (auto const& liquid : root.liquidsDatabase()->allLiquidSettings()) {
@@ -51,6 +71,26 @@ void TilePainter::adjustLighting(WorldRenderData& renderData) const {
 }
 
 void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) {
+  double setupStart = Time::monotonicTime();
+  ++m_setupFrameIndex;
+
+  bool worldGenerationChanged = !m_cachedWorldRenderGeneration
+      || *m_cachedWorldRenderGeneration != renderData.worldRenderGeneration;
+  if (worldGenerationChanged)
+    m_cachedWorldRenderGeneration = renderData.worldRenderGeneration;
+
+  auto worldSize = renderData.geometry.size();
+  if (worldGenerationChanged || !m_cachedWorldSize || *m_cachedWorldSize != worldSize) {
+    m_cachedWorldSize = worldSize;
+    m_cachedChunkHashes.clear();
+    m_lastTerrainChunks.clear();
+    m_lastLiquidChunks.clear();
+    m_terrainChunkCache.clear();
+    m_liquidChunkCache.clear();
+    m_lastCameraCenter = {};
+    m_setupCostEmaMs = 0.0;
+  }
+
   auto cameraCenter = camera.centerWorldPosition();
   if (m_lastCameraCenter)
     m_cameraPan = renderData.geometry.diff(cameraCenter, *m_lastCameraCenter);
@@ -73,29 +113,99 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
   Map<QuadZLevel, List<RenderBufferPtr>> midgroundBuffersByZ;
   Map<QuadZLevel, List<RenderBufferPtr>> foregroundBuffersByZ;
 
+  double overload = 0.0;
+  if (m_setupCostEmaMs > 0.0) {
+    double overloadRange = std::max(0.1, m_chunkBuildBudgetOverloadMaxMs - m_chunkBuildBudgetOverloadStartMs);
+    overload = std::clamp((m_setupCostEmaMs - m_chunkBuildBudgetOverloadStartMs) / overloadRange, 0.0, 1.0);
+  }
+
+  auto chunkBuildBudget = [&](int64_t baseBudgetMicros, int64_t minBudgetMicros) {
+    if (!m_enableAdaptiveChunkBuildBudget || m_setupCostEmaMs <= 0.0)
+      return baseBudgetMicros;
+
+    double budgetScale = 1.0 - (overload * 0.75);
+    int64_t scaledBudget = (int64_t)(baseBudgetMicros * budgetScale);
+    return std::max(minBudgetMicros, scaledBudget);
+  };
+
+  int64_t terrainBudgetMicros = chunkBuildBudget(m_baseTerrainChunkBuildBudgetMicros, m_minTerrainChunkBuildBudgetMicros);
+  int64_t liquidBudgetMicros = chunkBuildBudget(m_baseLiquidChunkBuildBudgetMicros, m_minLiquidChunkBuildBudgetMicros);
+  if (worldGenerationChanged) {
+    // World transitions must render fully-correct terrain immediately; avoid
+    // adaptive throttling during this setup pass.
+    terrainBudgetMicros = std::numeric_limits<int64_t>::max();
+    liquidBudgetMicros = std::numeric_limits<int64_t>::max();
+  }
+
+  int hashRefreshStrideFrames = m_chunkHashRefreshBaseStrideFrames;
+  if (m_enableAdaptiveChunkHashCadence) {
+    int maxStride = std::max(m_chunkHashRefreshBaseStrideFrames, m_chunkHashRefreshMaxStrideFrames);
+    hashRefreshStrideFrames = m_chunkHashRefreshBaseStrideFrames + (int)((maxStride - m_chunkHashRefreshBaseStrideFrames) * overload);
+    hashRefreshStrideFrames = std::clamp(hashRefreshStrideFrames, 1, maxStride);
+  }
+
+  HashSet<Vec2I> visibleChunkIndices;
+
   for (int x = chunkRange.xMin(); x < chunkRange.xMax(); ++x) {
     for (int y = chunkRange.yMin(); y < chunkRange.yMax(); ++y) {
-      auto terrainChunk = getTerrainChunk(renderData, {x, y});
-      auto liquidChunk = getLiquidChunk(renderData, {x, y});
+      auto chunkIndex = Vec2I{x, y};
+      visibleChunkIndices.add(chunkIndex);
+      auto [terrainHash, liquidHash] = cachedChunkHashes(renderData, chunkIndex, hashRefreshStrideFrames);
+      auto terrainChunk = getTerrainChunk(renderData, chunkIndex, terrainHash, terrainBudgetMicros);
+      auto liquidChunk = getLiquidChunk(renderData, chunkIndex, liquidHash, liquidBudgetMicros);
 
-      if (auto backgroundLayer = terrainChunk->ptr(TerrainLayer::Background)) {
-        for (auto const& pair : *backgroundLayer)
-          backgroundBuffersByZ[pair.first].append(pair.second);
+      if (!terrainChunk) {
+        if (auto staleTerrainChunk = m_lastTerrainChunks.ptr(chunkIndex))
+          terrainChunk = *staleTerrainChunk;
       }
 
-      if (auto midgroundLayer = terrainChunk->ptr(TerrainLayer::Midground)) {
-        for (auto const& pair : *midgroundLayer)
-          midgroundBuffersByZ[pair.first].append(pair.second);
+      if (!liquidChunk) {
+        if (auto staleLiquidChunk = m_lastLiquidChunks.ptr(chunkIndex))
+          liquidChunk = *staleLiquidChunk;
       }
 
-      if (auto foregroundLayer = terrainChunk->ptr(TerrainLayer::Foreground)) {
-        for (auto const& pair : *foregroundLayer)
-          foregroundBuffersByZ[pair.first].append(pair.second);
+      if (terrainChunk)
+        m_lastTerrainChunks.set(chunkIndex, terrainChunk);
+      if (liquidChunk)
+        m_lastLiquidChunks.set(chunkIndex, liquidChunk);
+
+      if (terrainChunk) {
+        if (auto backgroundLayer = terrainChunk->ptr(TerrainLayer::Background)) {
+          for (auto const& pair : *backgroundLayer)
+            backgroundBuffersByZ[pair.first].append(pair.second);
+        }
+
+        if (auto midgroundLayer = terrainChunk->ptr(TerrainLayer::Midground)) {
+          for (auto const& pair : *midgroundLayer)
+            midgroundBuffersByZ[pair.first].append(pair.second);
+        }
+
+        if (auto foregroundLayer = terrainChunk->ptr(TerrainLayer::Foreground)) {
+          for (auto const& pair : *foregroundLayer)
+            foregroundBuffersByZ[pair.first].append(pair.second);
+        }
       }
 
-      for (auto const& pair : *liquidChunk)
-        m_liquidBuffers.append(pair.second);
+      if (liquidChunk) {
+        for (auto const& pair : *liquidChunk)
+          m_liquidBuffers.append(pair.second);
+      }
     }
+  }
+
+  for (auto const& chunkIndex : m_lastTerrainChunks.keys()) {
+    if (!visibleChunkIndices.contains(chunkIndex))
+      m_lastTerrainChunks.remove(chunkIndex);
+  }
+
+  for (auto const& chunkIndex : m_lastLiquidChunks.keys()) {
+    if (!visibleChunkIndices.contains(chunkIndex))
+      m_lastLiquidChunks.remove(chunkIndex);
+  }
+
+  for (auto const& chunkIndex : m_cachedChunkHashes.keys()) {
+    if (!visibleChunkIndices.contains(chunkIndex))
+      m_cachedChunkHashes.remove(chunkIndex);
   }
 
   for (auto& pair : backgroundBuffersByZ)
@@ -104,6 +214,12 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
     m_midgroundTerrainBuffers.appendAll(std::move(pair.second));
   for (auto& pair : foregroundBuffersByZ)
     m_foregroundTerrainBuffers.appendAll(std::move(pair.second));
+
+  double setupCostMs = (Time::monotonicTime() - setupStart) * 1000.0;
+  if (m_setupCostEmaMs <= 0.0)
+    m_setupCostEmaMs = setupCostMs;
+  else
+    m_setupCostEmaMs += (setupCostMs - m_setupCostEmaMs) * m_setupCostSmoothing;
 }
 
 void TilePainter::renderBackground(WorldCamera const& camera) {
@@ -117,8 +233,6 @@ void TilePainter::renderMidground(WorldCamera const& camera) {
 void TilePainter::renderLiquid(WorldCamera const& /*camera*/) {
   for (auto const& buffer : m_liquidBuffers)
     m_renderer->renderBuffer(buffer, m_cameraTransformation);
-
-  m_renderer->flush();
 }
 
 void TilePainter::renderForeground(WorldCamera const& camera) {
@@ -133,8 +247,14 @@ void TilePainter::cleanup() {
 }
 
 void TilePainter::cleanupCache() {
-  if (m_reloadTracker->pullTriggered())
+  if (m_reloadTracker->pullTriggered()) {
     refreshRenderConfig();
+    m_cachedChunkHashes.clear();
+    m_lastTerrainChunks.clear();
+    m_lastLiquidChunks.clear();
+    m_terrainChunkCache.clear();
+    m_liquidChunkCache.clear();
+  }
 
   m_textureCache.cleanup();
   m_terrainChunkCache.cleanup();
@@ -179,6 +299,41 @@ void TilePainter::refreshRenderConfig() {
     m_textureCache.setMaxSize(*tileTextureCacheMax);
   else
     m_textureCache.setMaxSize(NPos);
+
+  m_terrainDamageHashLevelQuantization = (uint8_t)std::clamp<uint64_t>(
+      renderingConfig.optUInt("terrainDamageHashLevelQuantization").value(16), 1, 255);
+  m_liquidHashLevelQuantization = (uint8_t)std::clamp<uint64_t>(
+      renderingConfig.optUInt("liquidHashLevelQuantization").value(32), 1, 255);
+
+  m_enableAdaptiveChunkBuildBudget = renderingConfig.optBool("adaptiveChunkBuildBudgetEnabled").value(true);
+
+  m_baseTerrainChunkBuildBudgetMicros = (int64_t)std::clamp<uint64_t>(
+      renderingConfig.optUInt("terrainChunkBuildBudgetMicros").value(3000), 64, 500000);
+  m_baseLiquidChunkBuildBudgetMicros = (int64_t)std::clamp<uint64_t>(
+      renderingConfig.optUInt("liquidChunkBuildBudgetMicros").value(1500), 64, 500000);
+  m_minTerrainChunkBuildBudgetMicros = (int64_t)std::clamp<uint64_t>(
+      renderingConfig.optUInt("terrainChunkBuildBudgetMinMicros").value(500), 16, 500000);
+  m_minLiquidChunkBuildBudgetMicros = (int64_t)std::clamp<uint64_t>(
+      renderingConfig.optUInt("liquidChunkBuildBudgetMinMicros").value(250), 16, 500000);
+
+  if (m_minTerrainChunkBuildBudgetMicros > m_baseTerrainChunkBuildBudgetMicros)
+    m_minTerrainChunkBuildBudgetMicros = m_baseTerrainChunkBuildBudgetMicros;
+  if (m_minLiquidChunkBuildBudgetMicros > m_baseLiquidChunkBuildBudgetMicros)
+    m_minLiquidChunkBuildBudgetMicros = m_baseLiquidChunkBuildBudgetMicros;
+
+  m_chunkBuildBudgetOverloadStartMs = std::max(0.1, (double)renderingConfig.optFloat("adaptiveChunkBuildBudgetOverloadStartMs").value(6.0f));
+  m_chunkBuildBudgetOverloadMaxMs = std::max(
+      m_chunkBuildBudgetOverloadStartMs + 0.1,
+      (double)renderingConfig.optFloat("adaptiveChunkBuildBudgetOverloadMaxMs").value(18.0f));
+  m_setupCostSmoothing = std::clamp((double)renderingConfig.optFloat("adaptiveChunkBuildBudgetSmoothing").value(0.15f), 0.01, 1.0);
+
+  m_enableAdaptiveChunkHashCadence = renderingConfig.optBool("adaptiveChunkHashCadenceEnabled").value(true);
+  m_chunkHashRefreshBaseStrideFrames = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("adaptiveChunkHashCadenceBaseStrideFrames").value(1), 1, 32);
+  m_chunkHashRefreshMaxStrideFrames = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("adaptiveChunkHashCadenceMaxStrideFrames").value(4), 1, 64);
+  if (m_chunkHashRefreshMaxStrideFrames < m_chunkHashRefreshBaseStrideFrames)
+    m_chunkHashRefreshMaxStrideFrames = m_chunkHashRefreshBaseStrideFrames;
 }
 
 size_t TilePainter::TextureKeyHash::operator()(TextureKey const& key) const {
@@ -188,33 +343,51 @@ size_t TilePainter::TextureKeyHash::operator()(TextureKey const& key) const {
     return hashOf(key.typeIndex(), key.get<AssetTextureKey>());
 }
 
-TilePainter::ChunkHash TilePainter::terrainChunkHash(WorldRenderData& renderData, Vec2I chunkIndex) {
-  //XXHash3 hasher;
-  static ByteArray buffer;
-  buffer.clear();
+pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::chunkHashes(WorldRenderData& renderData, Vec2I chunkIndex) const {
+  XXHash3 terrainHasher;
+  XXHash3 liquidHasher;
   RectI tileRange = RectI::withSize(chunkIndex * RenderChunkSize, Vec2I::filled(RenderChunkSize)).padded(MaterialRenderProfileMaxNeighborDistance);
+
   forEachRenderTile(renderData, tileRange, [&](Vec2I const&, RenderTile const& renderTile) {
-    //renderTile.hashPushTerrain(hasher);
-    buffer.append((char*)&renderTile, offsetof(RenderTile, liquidId));
+    if (m_terrainDamageHashLevelQuantization <= 1) {
+      renderTile.hashPushTerrain(terrainHasher);
+    } else {
+      RenderTile quantizedTile = renderTile;
+      quantizedTile.foregroundDamageLevel = (uint8_t)((quantizedTile.foregroundDamageLevel / m_terrainDamageHashLevelQuantization) * m_terrainDamageHashLevelQuantization);
+      quantizedTile.backgroundDamageLevel = (uint8_t)((quantizedTile.backgroundDamageLevel / m_terrainDamageHashLevelQuantization) * m_terrainDamageHashLevelQuantization);
+      quantizedTile.hashPushTerrain(terrainHasher);
+    }
+
+    uint8_t liquidLevel = renderTile.liquidLevel;
+    if (m_liquidHashLevelQuantization > 1) {
+      liquidLevel = (uint8_t)((liquidLevel / m_liquidHashLevelQuantization) * m_liquidHashLevelQuantization);
+    }
+
+    xxHash3Push(liquidHasher, (unsigned int)renderTile.liquidId);
+    xxHash3Push(liquidHasher, (unsigned int)liquidLevel);
   });
 
-  //return hasher.digest();
-  return XXH3_64bits(buffer.ptr(), buffer.size());
+  return {terrainHasher.digest(), liquidHasher.digest()};
 }
 
-TilePainter::ChunkHash TilePainter::liquidChunkHash(WorldRenderData& renderData, Vec2I chunkIndex) {
-  ///XXHash3 hasher;
-  RectI tileRange = RectI::withSize(chunkIndex * RenderChunkSize, Vec2I::filled(RenderChunkSize)).padded(MaterialRenderProfileMaxNeighborDistance);
-  static ByteArray buffer;
-  buffer.clear();
+pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::cachedChunkHashes(WorldRenderData& renderData, Vec2I chunkIndex, int hashRefreshStrideFrames) {
+  if (hashRefreshStrideFrames <= 1) {
+    auto hashes = chunkHashes(renderData, chunkIndex);
+    m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second});
+    return hashes;
+  }
 
-  forEachRenderTile(renderData, tileRange, [&](Vec2I const&, RenderTile const& renderTile) {
-    //renderTile.hashPushLiquid(hasher);
-    buffer.append((char*)&renderTile.liquidId, sizeof(LiquidId) + sizeof(LiquidLevel));
-  });
+  uint64_t phase = hashOf(chunkIndex[0], chunkIndex[1]) % (uint64_t)hashRefreshStrideFrames;
+  uint64_t framePhase = m_setupFrameIndex % (uint64_t)hashRefreshStrideFrames;
 
-  //return hasher.digest();
-  return XXH3_64bits(buffer.ptr(), buffer.size());
+  if (auto cached = m_cachedChunkHashes.ptr(chunkIndex)) {
+    if (phase != framePhase)
+      return {cached->terrainHash, cached->liquidHash};
+  }
+
+  auto hashes = chunkHashes(renderData, chunkIndex);
+  m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second});
+  return hashes;
 }
 
 void TilePainter::renderTerrainChunks(WorldCamera const& /*camera*/, TerrainLayer terrainLayer) {
@@ -232,56 +405,80 @@ void TilePainter::renderTerrainChunks(WorldCamera const& /*camera*/, TerrainLaye
   m_renderer->flush();
 }
 
-shared_ptr<TilePainter::TerrainChunk const> TilePainter::getTerrainChunk(WorldRenderData& renderData, Vec2I chunkIndex) {
-  pair<Vec2I, ChunkHash> chunkKey = {chunkIndex, terrainChunkHash(renderData, chunkIndex)};
-  return m_terrainChunkCache.get(chunkKey, [&](auto const&) {
-      HashMap<TerrainLayer, HashMap<QuadZLevel, List<RenderPrimitive>>> terrainPrimitives;
+shared_ptr<TilePainter::TerrainChunk const> TilePainter::buildTerrainChunk(WorldRenderData& renderData, Vec2I chunkIndex) {
+  HashMap<TerrainLayer, HashMap<QuadZLevel, List<RenderPrimitive>>> terrainPrimitives;
 
-      RectI tileRange = RectI::withSize(chunkIndex * RenderChunkSize, Vec2I::filled(RenderChunkSize));
-      for (int x = tileRange.xMin(); x < tileRange.xMax(); ++x) {
-        for (int y = tileRange.yMin(); y < tileRange.yMax(); ++y) {
-          bool occluded = this->produceTerrainPrimitives(terrainPrimitives[TerrainLayer::Foreground], TerrainLayer::Foreground, {x, y}, renderData);
-          occluded = this->produceTerrainPrimitives(terrainPrimitives[TerrainLayer::Midground], TerrainLayer::Midground, {x, y}, renderData) || occluded;
-          if (!occluded)
-            this->produceTerrainPrimitives(terrainPrimitives[TerrainLayer::Background], TerrainLayer::Background, {x, y}, renderData);
-        }
-      }
+  RectI tileRange = RectI::withSize(chunkIndex * RenderChunkSize, Vec2I::filled(RenderChunkSize));
+  for (int x = tileRange.xMin(); x < tileRange.xMax(); ++x) {
+    for (int y = tileRange.yMin(); y < tileRange.yMax(); ++y) {
+      bool occluded = this->produceTerrainPrimitives(terrainPrimitives[TerrainLayer::Foreground], TerrainLayer::Foreground, {x, y}, renderData);
+      occluded = this->produceTerrainPrimitives(terrainPrimitives[TerrainLayer::Midground], TerrainLayer::Midground, {x, y}, renderData) || occluded;
+      if (!occluded)
+        this->produceTerrainPrimitives(terrainPrimitives[TerrainLayer::Background], TerrainLayer::Background, {x, y}, renderData);
+    }
+  }
 
-      auto chunk = make_shared<TerrainChunk>();
+  auto chunk = make_shared<TerrainChunk>();
+  for (auto& layerPair : terrainPrimitives) {
+    for (auto& zLevelPair : layerPair.second) {
+      auto rb = m_renderer->createRenderBuffer();
+      rb->set(zLevelPair.second);
+      (*chunk)[layerPair.first][zLevelPair.first] = std::move(rb);
+    }
+  }
 
-      for (auto& layerPair : terrainPrimitives) {
-        for (auto& zLevelPair : layerPair.second) {
-          auto rb = m_renderer->createRenderBuffer();
-          rb->set(zLevelPair.second);
-          (*chunk)[layerPair.first][zLevelPair.first] = std::move(rb);
-        }
-      }
-
-      return chunk;
-    });
+  return chunk;
 }
 
-shared_ptr<TilePainter::LiquidChunk const> TilePainter::getLiquidChunk(WorldRenderData& renderData, Vec2I chunkIndex) {
-  pair<Vec2I, ChunkHash> chunkKey = {chunkIndex, liquidChunkHash(renderData, chunkIndex)};
-  return m_liquidChunkCache.get(chunkKey, [&](auto const&) {
-      HashMap<LiquidId, List<RenderPrimitive>> liquidPrimitives;
+shared_ptr<TilePainter::TerrainChunk const> TilePainter::getTerrainChunk(WorldRenderData& renderData, Vec2I chunkIndex, ChunkHash terrainHash, int64_t& terrainBudgetMicros) {
+  pair<Vec2I, ChunkHash> chunkKey = {chunkIndex, terrainHash};
+  if (auto cachedChunk = m_terrainChunkCache.ptr(chunkKey))
+    return *cachedChunk;
 
-      RectI tileRange = RectI::withSize(chunkIndex * RenderChunkSize, Vec2I::filled(RenderChunkSize));
-      for (int x = tileRange.xMin(); x < tileRange.xMax(); ++x) {
-        for (int y = tileRange.yMin(); y < tileRange.yMax(); ++y)
-          this->produceLiquidPrimitives(liquidPrimitives, {x, y}, renderData);
-      }
+  if (terrainBudgetMicros <= 0)
+    return {};
 
-      auto chunk = make_shared<LiquidChunk>();
+  double buildStart = Time::monotonicTime();
+  auto chunk = buildTerrainChunk(renderData, chunkIndex);
+  int64_t buildMicros = std::max<int64_t>(1, (int64_t)((Time::monotonicTime() - buildStart) * 1000000.0));
+  terrainBudgetMicros -= buildMicros;
+  m_terrainChunkCache.set(chunkKey, chunk);
+  return chunk;
+}
 
-      for (auto& p : liquidPrimitives) {
-        auto rb = m_renderer->createRenderBuffer();
-        rb->set(p.second);
-        chunk->set(p.first, std::move(rb));
-      }
+shared_ptr<TilePainter::LiquidChunk const> TilePainter::buildLiquidChunk(WorldRenderData& renderData, Vec2I chunkIndex) {
+  HashMap<LiquidId, List<RenderPrimitive>> liquidPrimitives;
 
-      return chunk;
-    });
+  RectI tileRange = RectI::withSize(chunkIndex * RenderChunkSize, Vec2I::filled(RenderChunkSize));
+  for (int x = tileRange.xMin(); x < tileRange.xMax(); ++x) {
+    for (int y = tileRange.yMin(); y < tileRange.yMax(); ++y)
+      this->produceLiquidPrimitives(liquidPrimitives, {x, y}, renderData);
+  }
+
+  auto chunk = make_shared<LiquidChunk>();
+  for (auto& p : liquidPrimitives) {
+    auto rb = m_renderer->createRenderBuffer();
+    rb->set(p.second);
+    chunk->set(p.first, std::move(rb));
+  }
+
+  return chunk;
+}
+
+shared_ptr<TilePainter::LiquidChunk const> TilePainter::getLiquidChunk(WorldRenderData& renderData, Vec2I chunkIndex, ChunkHash liquidHash, int64_t& liquidBudgetMicros) {
+  pair<Vec2I, ChunkHash> chunkKey = {chunkIndex, liquidHash};
+  if (auto cachedChunk = m_liquidChunkCache.ptr(chunkKey))
+    return *cachedChunk;
+
+  if (liquidBudgetMicros <= 0)
+    return {};
+
+  double buildStart = Time::monotonicTime();
+  auto chunk = buildLiquidChunk(renderData, chunkIndex);
+  int64_t buildMicros = std::max<int64_t>(1, (int64_t)((Time::monotonicTime() - buildStart) * 1000000.0));
+  liquidBudgetMicros -= buildMicros;
+  m_liquidChunkCache.set(chunkKey, chunk);
+  return chunk;
 }
 
 bool TilePainter::produceTerrainPrimitives(HashMap<QuadZLevel, List<RenderPrimitive>>& primitives,

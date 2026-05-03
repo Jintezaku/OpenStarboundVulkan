@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <fstream>
 
 #include "StarFile.hpp"
 #include "StarString.hpp"
@@ -23,8 +24,13 @@ inline bool isSteamDeck() {
 
   auto readSystemFile = [](String const& path) {
     try {
-      if (File::isFile(path))
-        return File::readFileString(path).trim();
+      std::ifstream file(path.utf8Ptr());
+      if (!file.good())
+        return String{};
+
+      std::string line;
+      if (std::getline(file, line))
+        return String(line).trim();
     } catch (...) {
     }
 

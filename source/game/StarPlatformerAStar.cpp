@@ -85,11 +85,12 @@ namespace PlatformerAStar {
       return distance(node.position, m_searchTo) < NodeGranularity;
     };
     auto neighborsFn = [this](Node const& node, List<Edge>& result) {
-      auto neighborFilter = [this](Edge const& edge) -> bool {
-        return distance(edge.source.position, m_searchFrom) <= m_searchParams.maxDistance.value(DefaultMaxDistance);
-      };
+      float maxDistance = m_searchParams.maxDistance.value(DefaultMaxDistance);
+      Vec2F startDiff = m_world->geometry().diff(node.position, m_searchFrom);
+      if (startDiff.magnitudeSquared() > maxDistance * maxDistance)
+        return;
+
       neighbors(node, result);
-      result.filter(neighborFilter);
     };
     auto validateEndFn = [this](Edge const& edge) -> bool {
       if (!m_searchParams.mustEndOnGround)

@@ -3,6 +3,7 @@
 #include "StarRoot.hpp"
 #include "StarConfiguration.hpp"
 #include "StarAssets.hpp"
+#include "StarAlgorithm.hpp"
 #include "StarJsonExtra.hpp"
 #include "StarTime.hpp"
 
@@ -13,13 +14,23 @@ WorldPainter::WorldPainter() {
   m_reloadTracker = make_shared<TrackerListener>();
   Root::singleton().registerReloadListener(m_reloadTracker);
   m_nextCleanupTime = 0;
-  m_cacheCleanupInterval = 500;
+  m_cacheCleanupInterval = 1500;
+  m_cacheCleanupPhase = 0;
+  m_previousFrameRenderMs = 0.0f;
+  m_particleRenderCapPerLayer = 2048;
+  m_particleRenderCapPerLayerMin = 256;
+  m_particleAdaptiveBudgetFrameMs = 16.7f;
+  m_drawableCullBypassThreshold = 2048;
+  m_drawableCullBypassMaxFrameMs = 14.0f;
+  m_drawableWorldCoarseCullPadding = 16.0f;
+  m_skipDrawableCulling = false;
 
   m_camera.setScreenSize({800, 600});
   m_camera.setCenterWorldPosition(Vec2F());
   m_camera.setPixelRatio(Root::singleton().configuration()->get("zoomLevel").toFloat());
 
   m_highlightConfig = m_assets->json("/highlights.config");
+  m_maxHighlightLevel = m_highlightConfig.getFloat("maxHighlightLevel", 1.0f);
   for (auto p : m_highlightConfig.get("highlightDirectives").iterateObject())
     m_highlightDirectives.set(EntityHighlightEffectTypeNames.getLeft(p.first), {p.second.getString("underlay", ""), p.second.getString("overlay", "")});
 
@@ -55,14 +66,35 @@ void WorldPainter::update(float dt) {
 }
 
 void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWaiter) {
+  int64_t renderFrameStartUs = Time::monotonicMicroseconds();
+
   m_camera.setScreenSize(m_renderer->screenSize());
   m_camera.setTargetPixelRatio(Root::singleton().configuration()->get("zoomLevel").toFloat());
+  m_worldScreenRect = RectF::withSize(Vec2F(), Vec2F(m_camera.screenSize()));
+  m_worldCoarseCullRect = m_camera.worldScreenRect().padded(m_drawableWorldCoarseCullPadding);
 
   m_assets = Root::singleton().assets();
   if (m_reloadTracker->pullTriggered())
     refreshRenderConfig();
 
   m_tilePainter->setup(m_camera, renderData);
+
+  m_backParticles.clear();
+  m_middleParticles.clear();
+  m_frontParticles.clear();
+  if (renderData.particles) {
+    m_backParticles.reserve(renderData.particles->size() / 3);
+    m_middleParticles.reserve(renderData.particles->size() / 3);
+    m_frontParticles.reserve(renderData.particles->size() / 3);
+    for (auto const& particle : *renderData.particles) {
+      if (particle.layer == Particle::Layer::Back)
+        m_backParticles.append(&particle);
+      else if (particle.layer == Particle::Layer::Middle)
+        m_middleParticles.append(&particle);
+      else if (particle.layer == Particle::Layer::Front)
+        m_frontParticles.append(&particle);
+    }
+  }
 
   // Stars, Debris Fields, Sky, and Orbiters
 
@@ -113,26 +145,29 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
     m_environmentPainter->renderParallaxLayers(m_parallaxWorldPosition, m_camera, renderData.parallaxLayers, renderData.skyRenderData);
 
   // Main world layers
+  auto& entityDrawables = renderData.entityLayerDrawables;
 
-  Map<EntityRenderLayer, List<pair<EntityHighlightEffect, List<Drawable>>>> entityDrawables;
-  for (auto& ed : renderData.entityDrawables) {
-    for (auto& p : ed.layers)
-      entityDrawables[p.first].append({ed.highlightEffect, std::move(p.second)});
-  }
+  m_skipDrawableCulling = m_drawableCullBypassThreshold > 0
+      && renderData.entityDrawableCount >= m_drawableCullBypassThreshold
+      && m_previousFrameRenderMs <= m_drawableCullBypassMaxFrameMs;
 
-  auto entityDrawableIterator = entityDrawables.begin();
-  auto renderEntitiesUntil = [this, &entityDrawables, &entityDrawableIterator](Maybe<EntityRenderLayer> until) {
+  size_t entityDrawableIndex = 0;
+  auto renderEntitiesUntil = [this, &renderData, &entityDrawables, &entityDrawableIndex](Maybe<EntityRenderLayer> until) {
+    bool drewLayer = false;
     while (true) {
-      if (entityDrawableIterator == entityDrawables.end())
+      if (entityDrawableIndex >= entityDrawables.size())
         break;
-      if (until && entityDrawableIterator->first >= *until)
+      if (until && entityDrawables[entityDrawableIndex].layer >= *until)
         break;
-      for (auto& edl : entityDrawableIterator->second)
-        drawEntityLayer(std::move(edl.second), edl.first);
-      ++entityDrawableIterator;
+
+      auto& entityDrawable = entityDrawables[entityDrawableIndex];
+      drawEntityLayer(renderData.entityDrawablesArena, entityDrawable.drawablesBegin, entityDrawable.drawablesCount, entityDrawable.highlightEffect);
+      ++entityDrawableIndex;
+      drewLayer = true;
     }
 
-    m_renderer->flush();
+    if (drewLayer)
+      m_renderer->flush();
   };
 
   renderEntitiesUntil(RenderLayerBackgroundOverlay);
@@ -166,12 +201,28 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
 
   int64_t now = Time::monotonicMilliseconds();
   if (now >= m_nextCleanupTime) {
-    m_textPainter->cleanup(m_textureTimeout);
-    m_drawablePainter->cleanup(m_textureTimeout);
-    m_environmentPainter->cleanup(m_textureTimeout);
-    m_tilePainter->cleanupCache();
-    m_nextCleanupTime = now + m_cacheCleanupInterval;
+    // Skip cleanup during overloaded frames to avoid amplifying stutter spikes.
+    bool allowCleanup = m_previousFrameRenderMs <= 16.7f
+        || (now - m_nextCleanupTime) >= (m_cacheCleanupInterval * 6);
+    if (allowCleanup) {
+      // Stagger cache cleanup to avoid periodic one-frame stalls in heavy scenes.
+      if (m_cacheCleanupPhase == 0) {
+        m_textPainter->cleanup(m_textureTimeout);
+        m_drawablePainter->cleanup(m_textureTimeout);
+      } else if (m_cacheCleanupPhase == 1) {
+        m_environmentPainter->cleanup(m_textureTimeout);
+      } else {
+        m_tilePainter->cleanupCache();
+      }
+
+      m_cacheCleanupPhase = (uint8_t)((m_cacheCleanupPhase + 1) % 3);
+      m_nextCleanupTime = now + m_cacheCleanupInterval;
+    } else {
+      m_nextCleanupTime = now + 100;
+    }
   }
+
+  m_previousFrameRenderMs = (float)(Time::monotonicMicroseconds() - renderFrameStartUs) / 1000.0f;
 }
 
 void WorldPainter::adjustLighting(WorldRenderData& renderData) {
@@ -189,25 +240,55 @@ void WorldPainter::refreshRenderConfig() {
   m_lightMapMultiplier = renderingConfig.getFloat("lightMapMultiplier");
   m_textParticleFontSize = renderingConfig.getInt("textParticleFontSize");
   m_particleRenderWindowPadding = renderingConfig.getInt("particleRenderWindowPadding");
+  m_particleRenderCapPerLayer = renderingConfig.optUInt("particleRenderCapPerLayer").value(2048);
+  m_particleRenderCapPerLayerMin = renderingConfig.optUInt("particleRenderCapPerLayerMin").value(256);
+  m_particleAdaptiveBudgetFrameMs = renderingConfig.optFloat("particleAdaptiveBudgetFrameMs").value(16.7f);
+  if (m_particleRenderCapPerLayerMin > m_particleRenderCapPerLayer)
+    m_particleRenderCapPerLayerMin = m_particleRenderCapPerLayer;
+  if (m_particleAdaptiveBudgetFrameMs < 0.0f)
+    m_particleAdaptiveBudgetFrameMs = 0.0f;
+  m_drawableCullBypassThreshold = renderingConfig.optUInt("drawableCullBypassThreshold").value(2048);
+  m_drawableCullBypassMaxFrameMs = renderingConfig.optFloat("drawableCullBypassMaxFrameMs").value(14.0f);
+  if (m_drawableCullBypassMaxFrameMs < 0.0f)
+    m_drawableCullBypassMaxFrameMs = 0.0f;
+  m_drawableWorldCoarseCullPadding = renderingConfig.optFloat("drawableWorldCoarseCullPadding").value(16.0f);
+  if (m_drawableWorldCoarseCullPadding < 0.0f)
+    m_drawableWorldCoarseCullPadding = 0.0f;
 
   m_textureTimeout = (int64_t)(renderingConfig.getInt("textureTimeout") * cacheRetentionMultiplier);
   if (m_textureTimeout < 1)
     m_textureTimeout = 1;
 
-  m_cacheCleanupInterval = renderingConfig.optInt("cacheCleanupIntervalMs").value(500);
+  m_cacheCleanupInterval = renderingConfig.optInt("cacheCleanupIntervalMs").value(1500);
   if (m_cacheCleanupInterval < 50)
     m_cacheCleanupInterval = 50;
 }
 
 void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer layer) {
   const RectF particleRenderWindow = RectF::withSize(Vec2F(), Vec2F(m_camera.screenSize())).padded(m_particleRenderWindowPadding);
-
-  if (!renderData.particles)
+  List<Particle const*> const* particles = nullptr;
+  if (layer == Particle::Layer::Back)
+    particles = &m_backParticles;
+  else if (layer == Particle::Layer::Middle)
+    particles = &m_middleParticles;
+  else if (layer == Particle::Layer::Front)
+    particles = &m_frontParticles;
+  if (!particles)
     return;
 
-  for (Particle const& particle : *renderData.particles) {
-    if (layer != particle.layer)
-      continue;
+  uint64_t particleCap = m_particleRenderCapPerLayer;
+  if (particleCap > 0 && m_particleAdaptiveBudgetFrameMs > 0.0f && m_previousFrameRenderMs > m_particleAdaptiveBudgetFrameMs) {
+    float overloadRatio = m_previousFrameRenderMs / m_particleAdaptiveBudgetFrameMs;
+    uint64_t scaledCap = (uint64_t)(particleCap / overloadRatio);
+    particleCap = std::max(m_particleRenderCapPerLayerMin, scaledCap);
+  }
+
+  uint64_t renderedParticles = 0;
+  for (auto particlePtr : *particles) {
+    if (particleCap > 0 && renderedParticles >= particleCap)
+      break;
+
+    Particle const& particle = *particlePtr;
 
     Vec2F position = m_camera.worldToScreen(particle.position);
 
@@ -221,6 +302,7 @@ void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer 
         RectF(position - size / 2, position + size / 2),
         particle.color.toRgba(),
         particle.fullbright ? 0.0f : 1.0f);
+      ++renderedParticles;
 
     } else if (particle.type == Particle::Type::Streak) {
       // Draw a rotated quad streaking in the direction the particle is coming from.
@@ -236,6 +318,7 @@ void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer 
         position - dir * length + sideHalf,
         position - dir * length - sideHalf,
         color, lightMapMultiplier);
+      ++renderedParticles;
 
     } else if (particle.type == Particle::Type::Textured || particle.type == Particle::Type::Animated) {
       Drawable drawable;
@@ -254,6 +337,7 @@ void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer 
       drawable.scale(particle.size);
       drawable.translate(particle.position);
       drawDrawable(std::move(drawable));
+      ++renderedParticles;
 
     } else if (particle.type == Particle::Type::Text) {
       Vec2F position = m_camera.worldToScreen(particle.position);
@@ -264,11 +348,10 @@ void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer 
         m_textPainter->setProcessingDirectives("");
         m_textPainter->setFont("");
         m_textPainter->renderText(particle.string, {position, HorizontalAnchor::HMidAnchor, VerticalAnchor::VMidAnchor});
+        ++renderedParticles;
       }
     }
   }
-
-  m_renderer->flush();
 }
 
 void WorldPainter::renderBars(WorldRenderData& renderData) {
@@ -291,17 +374,20 @@ void WorldPainter::renderBars(WorldRenderData& renderData) {
       drawDrawable(Drawable::makePoly(PolyF(fullBar), fullColor, position));
     }
   }
-
-  m_renderer->flush();
 }
 
-void WorldPainter::drawEntityLayer(List<Drawable> drawables, EntityHighlightEffect highlightEffect) {
-  highlightEffect.level *= m_highlightConfig.getFloat("maxHighlightLevel", 1.0);
+void WorldPainter::drawEntityLayer(List<Drawable>& drawableArena, size_t drawablesBegin, size_t drawablesCount, EntityHighlightEffect highlightEffect) {
+  if (drawablesCount == 0)
+    return;
+
+  size_t drawablesEnd = drawablesBegin + drawablesCount;
+  highlightEffect.level *= m_maxHighlightLevel;
   if (m_highlightDirectives.contains(highlightEffect.type) && highlightEffect.level > 0) {
     // first pass, draw underlay
     auto underlayDirectives = m_highlightDirectives[highlightEffect.type].first;
     if (!underlayDirectives.empty()) {
-      for (auto& d : drawables) {
+      for (size_t i = drawablesBegin; i < drawablesEnd; ++i) {
+        auto& d = drawableArena[i];
         if (d.isImage()) {
           auto underlayDrawable = Drawable(d);
           underlayDrawable.fullbright = true;
@@ -314,19 +400,27 @@ void WorldPainter::drawEntityLayer(List<Drawable> drawables, EntityHighlightEffe
 
     // second pass, draw main drawables and overlays
     auto overlayDirectives = m_highlightDirectives[highlightEffect.type].second;
-    for (auto& d : drawables) {
-      drawDrawable(d);
-      if (!overlayDirectives.empty() && d.isImage()) {
-        auto overlayDrawable = Drawable(d);
-        overlayDrawable.fullbright = true;
-        overlayDrawable.color = Color::rgbaf(1, 1, 1, highlightEffect.level * d.color.alphaF());
-        overlayDrawable.imagePart().addDirectives(overlayDirectives, true);
-        drawDrawable(std::move(overlayDrawable));
+    bool hasOverlay = !overlayDirectives.empty();
+    for (size_t i = drawablesBegin; i < drawablesEnd; ++i) {
+      auto& d = drawableArena[i];
+      Maybe<Drawable> overlayDrawable;
+      if (hasOverlay && d.isImage()) {
+        overlayDrawable = Drawable(d);
+        auto& overlay = *overlayDrawable;
+        overlay.fullbright = true;
+        overlay.color = Color::rgbaf(1, 1, 1, highlightEffect.level * d.color.alphaF());
+        overlay.imagePart().addDirectives(overlayDirectives, true);
+      }
+
+      drawDrawable(std::move(d));
+      if (overlayDrawable) {
+        auto overlay = std::move(*overlayDrawable);
+        drawDrawable(std::move(overlay));
       }
     }
   } else {
-    for (auto& d : drawables)
-      drawDrawable(std::move(d));
+    for (size_t i = drawablesBegin; i < drawablesEnd; ++i)
+      drawDrawable(std::move(drawableArena[i]));
   }
 }
 
@@ -337,20 +431,20 @@ void WorldPainter::drawDrawable(Drawable drawable) {
   if (drawable.isLine())
     drawable.linePart().width *= m_camera.pixelRatio();
 
-  // draw the drawable if it's on screen
-  // if it's not on screen, there's a random chance to pre-load
-  // pre-load is not done on every tick because it's expensive to look up images with long paths
-  if (RectF::withSize(Vec2F(), Vec2F(m_camera.screenSize())).intersects(drawable.boundBox(false)))
+  if (m_skipDrawableCulling) {
     m_drawablePainter->drawDrawable(drawable);
-  else if (drawable.isImage() && Random::randf() < m_preloadTextureChance)
+    return;
+  }
+
+  if (m_worldScreenRect.intersects(drawable.boundBox(false)))
+    m_drawablePainter->drawDrawable(drawable);
+  else if (drawable.isImage() && m_previousFrameRenderMs <= 16.7f && Random::randf() < m_preloadTextureChance)
     m_assets->tryImage(drawable.imagePart().image);
 }
 
 void WorldPainter::drawDrawableSet(List<Drawable>& drawables) {
   for (Drawable& drawable : drawables)
     drawDrawable(std::move(drawable));
-
-  m_renderer->flush();
 }
 
 }

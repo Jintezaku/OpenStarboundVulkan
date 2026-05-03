@@ -10,6 +10,10 @@
     "scissor" : false,
     "letterbox" : false
   },
+  // Client-side world streaming smoothing:
+  // keep a slightly larger tile-sector ring and unload only a small number per frame.
+  "worldClientSectorRetainPadding" : 64,
+  "worldClientSectorUnloadPerFrame" : 8,
   "postProcessLayers": [],
   "postProcessGroups": {}
 }

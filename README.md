@@ -68,6 +68,11 @@ This fork keeps the OpenStarbound foundation and builds on top of it with Vulkan
 
 Credit for the OpenStarbound base belongs to the OpenStarbound project and its contributors.
 
+Latest upstream sync:
+
+* merged from `OpenStarbound/OpenStarbound` on **2026-05-03**;
+* upstream commit: `f34e0026` (`Update README.md`).
+
 ---
 
 ## Main focus areas

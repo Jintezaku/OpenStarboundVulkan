@@ -86,6 +86,11 @@
         "STAR_ENABLE_STATIC_LIBGCC_LIBSTDCXX": true,
         "STAR_USE_JEMALLOC": true
       },
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      },
       "vendor": {
         "microsoft.com/VisualStudioSettings/CMake/1.0": {
           "hostOS": [
@@ -220,27 +225,57 @@
     },
     {
       "name": "linux-release",
-      "configurePreset": "linux-release"
+      "configurePreset": "linux-release",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "name": "linux-arm-release",
-      "configurePreset": "linux-arm-release"
+      "configurePreset": "linux-arm-release",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "name": "linux-release-clang",
-      "configurePreset": "linux-release-clang"
+      "configurePreset": "linux-release-clang",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "name": "linux-arm-release-clang",
-      "configurePreset": "linux-arm-release-clang"
+      "configurePreset": "linux-arm-release-clang",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "name": "linux-vulkan-dev",
-      "configurePreset": "linux-vulkan-dev"
+      "configurePreset": "linux-vulkan-dev",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "name": "linux-vulkan-dev-no-ipo",
-      "configurePreset": "linux-vulkan-dev-no-ipo"
+      "configurePreset": "linux-vulkan-dev-no-ipo",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "name": "macos-release",
@@ -273,22 +308,42 @@
     {
       "inherits": "base",
       "name": "linux-release",
-      "configurePreset": "linux-release"
+      "configurePreset": "linux-release",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "inherits": "base",
       "name": "linux-arm-release",
-      "configurePreset": "linux-arm-release"
+      "configurePreset": "linux-arm-release",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "inherits": "base",
       "name": "linux-vulkan-dev",
-      "configurePreset": "linux-vulkan-dev"
+      "configurePreset": "linux-vulkan-dev",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "inherits": "base",
       "name": "linux-vulkan-dev-no-ipo",
-      "configurePreset": "linux-vulkan-dev-no-ipo"
+      "configurePreset": "linux-vulkan-dev-no-ipo",
+      "environment": {
+        "TMPDIR": "${sourceParentDir}/tmp/openstarbound-build",
+        "TMP": "${sourceParentDir}/tmp/openstarbound-build",
+        "TEMP": "${sourceParentDir}/tmp/openstarbound-build"
+      }
     },
     {
       "inherits": "base",

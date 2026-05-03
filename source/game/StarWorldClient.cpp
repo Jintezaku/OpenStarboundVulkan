@@ -21,6 +21,7 @@
 #include "StarStoredFunctions.hpp"
 #include "StarInspectableEntity.hpp"
 #include "StarCurve25519.hpp"
+#include <array>
 
 namespace Star {
 
@@ -33,6 +34,13 @@ WorldClient::WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot) {
   auto assets = root.assets();
 
   m_clientConfig = assets->json("/client.config");
+  auto highlightsConfig = assets->json("/highlights.config");
+  m_interactivePulseAmount = highlightsConfig.getFloat("interactivePulseAmount");
+  m_interactivePulseRate = highlightsConfig.getFloat("interactivePulseRate");
+  m_inspectionFlickerAmount = highlightsConfig.getFloat("inspectionFlickerAmount");
+  auto weatherConfig = assets->json("/weather.config");
+  m_weatherRayCheckDistance = weatherConfig.getFloat("weatherRayCheckDistance");
+  m_weatherRayCheckWindInfluence = weatherConfig.getFloat("weatherRayCheckWindInfluence");
 
   m_currentStep = 0;
   m_currentTime = 0;
@@ -91,6 +99,7 @@ WorldClient::WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot) {
 
   m_stopLightingThread = false;
   m_pendingLightReady = false;
+  m_deferredSectorUnloads = 0;
 
   clearWorld();
 }
@@ -489,20 +498,37 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
   m_previewTiles.clear();
 
   renderData.geometry = m_geometry;
+  renderData.worldRenderGeneration = m_renderWorldGeneration;
+
+  RectI window = m_clientState.window();
+  RectI tileRange = window.padded(bufferTiles);
+  renderData.tileMinPosition = tileRange.min();
+
+  bool entityRenderCullingEnabled = m_clientConfig.optBool("worldClientEntityRenderCullingEnabled").value(true);
+  bool entityLightCullingEnabled = m_clientConfig.optBool("worldClientEntityLightCullingEnabled").value(true);
+  float entityRenderCullPadding = m_clientConfig.optFloat("worldClientEntityRenderCullingPadding").value((float)bufferTiles + 4.0f);
+  float entityLightCullPadding = m_clientConfig.optFloat("worldClientEntityLightCullingPadding").value((float)bufferTiles + 8.0f);
+
+  RectF viewRect = RectF::withSize(Vec2F(window.min()), Vec2F(window.size()));
+  RectF entityRenderCullRect = viewRect.padded(entityRenderCullPadding);
+  RectF entityLightCullRect = viewRect.padded(entityLightCullPadding);
+
+  auto entityIntersectsRect = [this](EntityPtr const& entity, RectF const& rect) {
+    return m_geometry.rectIntersectsRect(rect, entity->metaBoundBox().translated(entity->position()));
+  };
 
   ClientRenderCallback lightingRenderCallback;
   m_entityMap->forAllEntities([&](EntityPtr const& entity) {
     if (m_startupHiddenEntities.contains(entity->entityId()))
       return;
 
+    if (entityLightCullingEnabled && !entityIntersectsRect(entity, entityLightCullRect))
+      return;
+
     entity->renderLightSources(&lightingRenderCallback);
   }, EntityIterationOrder::Natural);
 
   renderLightSources = std::move(lightingRenderCallback.lightSources);
-
-  RectI window = m_clientState.window();
-  RectI tileRange = window.padded(bufferTiles);
-  renderData.tileMinPosition = tileRange.min();
 
   if (!m_fullBright) {
     {
@@ -519,12 +545,10 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
       lightingCalc();
   }
 
-  float pulseAmount = Root::singleton().assets()->json("/highlights.config:interactivePulseAmount").toFloat();
-  float pulseRate = Root::singleton().assets()->json("/highlights.config:interactivePulseRate").toFloat();
-  float pulseLevel = 1 - pulseAmount * 0.5 * (sin(2 * Constants::pi * pulseRate * Time::monotonicMilliseconds() / 1000.0) + 1);
+  float pulseLevel = 1 - m_interactivePulseAmount * 0.5f * (sin(2 * Constants::pi * m_interactivePulseRate * Time::monotonicMilliseconds() / 1000.0) + 1);
 
   bool inspecting = m_mainPlayer->inspecting();
-  float inspectionFlickerMultiplier = Random::randf(1 - Root::singleton().assets()->json("/highlights.config:inspectionFlickerAmount").toFloat(), 1);
+  float inspectionFlickerMultiplier = Random::randf(1 - m_inspectionFlickerAmount, 1);
 
   EntityId playerAimInteractive = NullEntityId;
   if (Root::singleton().configuration()->get("interactiveHighlight").toBool()) {
@@ -538,8 +562,16 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
       if (auto& globalDirectives = parameters->globalDirectives)
         directives = &globalDirectives.get();
   }
+
+  std::array<List<EntityLayerDrawables>, (1u << RenderLayerUpperBits)> entityLayerBuckets;
+  size_t entityLayerCount = 0;
+  uint64_t entityDrawableCount = 0;
+
   m_entityMap->forAllEntities([&](EntityPtr const& entity) {
       if (m_startupHiddenEntities.contains(entity->entityId()))
+        return;
+
+      if (entityRenderCullingEnabled && !entityIntersectsRect(entity, entityRenderCullRect))
         return;
 
       ClientRenderCallback renderCallback;
@@ -567,35 +599,46 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
       }
       
 
-      EntityDrawables ed;
+      EntityHighlightEffect highlightEffect;
+
+      if (m_interactiveHighlightMode || (!inspecting && entity->entityId() == playerAimInteractive)) {
+        if (auto interactive = as<InteractiveEntity>(entity)) {
+          if (interactive->isInteractive()) {
+            highlightEffect.type = EntityHighlightEffectType::Interactive;
+            highlightEffect.level = pulseLevel;
+          }
+        }
+      } else if (inspecting) {
+        if (auto inspectable = as<InspectableEntity>(entity)) {
+          highlightEffect = m_mainPlayer->inspectionHighlight(inspectable);
+          highlightEffect.level *= inspectionFlickerMultiplier;
+        }
+      }
+
+      bool hasGlobalDirectives = directives && !directives->empty();
+      int directiveIndex = hasGlobalDirectives ? (unsigned(entity->entityId()) % directives->size()) : 0;
+
       for (auto& p : renderCallback.drawables) {
-        if (directives) {
-          int directiveIndex = unsigned(entity->entityId()) % directives->size();
+        if (hasGlobalDirectives) {
           for (auto& d : p.second) {
             if (d.isImage())
               d.imagePart().addDirectives(directives->at(directiveIndex), true);
           }
         }
-        ed.layers[p.first] = std::move(p.second);
+
+        if (p.second.empty())
+          continue;
+
+        size_t drawablesBegin = renderData.entityDrawablesArena.size();
+        renderData.entityDrawablesArena.appendAll(std::move(p.second));
+        size_t drawablesCount = renderData.entityDrawablesArena.size() - drawablesBegin;
+        entityDrawableCount += drawablesCount;
+        ++entityLayerCount;
+        size_t bucketIndex = p.first >> RenderLayerLowerBits;
+        entityLayerBuckets[bucketIndex].append({p.first, highlightEffect, drawablesBegin, drawablesCount});
       }
 
-      if (m_interactiveHighlightMode || (!inspecting && entity->entityId() == playerAimInteractive)) {
-        if (auto interactive = as<InteractiveEntity>(entity)) {
-          if (interactive->isInteractive()) {
-            ed.highlightEffect.type = EntityHighlightEffectType::Interactive;
-            ed.highlightEffect.level = pulseLevel;
-          }
-        }
-      } else if (inspecting) {
-        if (auto inspectable = as<InspectableEntity>(entity)) {
-          ed.highlightEffect = m_mainPlayer->inspectionHighlight(inspectable);
-          ed.highlightEffect.level *= inspectionFlickerMultiplier;
-        }
-      }
-      renderData.entityDrawables.append(std::move(ed));
-
-      if (directives) {
-        int directiveIndex = unsigned(entity->entityId()) % directives->size();
+      if (hasGlobalDirectives) {
         for (auto& p : renderCallback.particles)
           p.directives.append(directives->get(directiveIndex));
       }
@@ -606,6 +649,17 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
       renderData.overheadBars.appendAll(std::move(renderCallback.overheadBars));
 
     }, EntityIterationOrder::ByEntityId);
+
+  renderData.entityLayerDrawables.reserve(entityLayerCount);
+  for (auto& bucket : entityLayerBuckets) {
+    if (bucket.size() > 1) {
+      stableSort(bucket, [](EntityLayerDrawables const& lhs, EntityLayerDrawables const& rhs) {
+        return lhs.layer < rhs.layer;
+      });
+    }
+    renderData.entityLayerDrawables.appendAll(std::move(bucket));
+  }
+  renderData.entityDrawableCount = entityDrawableCount;
 
   m_tileArray->tileEachTo(renderData.tiles, tileRange, [&](RenderTile& renderTile, Vec2I const&, ClientTile const& clientTile) {
       renderTile.foreground = clientTile.foreground;
@@ -1304,7 +1358,11 @@ void WorldClient::update(float dt) {
 
   LogMap::set("client_ping", m_latency);
 
-  // Remove active sectors that are outside of the current monitoring region
+  // Remove active sectors that are outside of the current monitoring region.
+  // Throttle unloads so crossing into new areas does not free a large number
+  // of sectors in a single frame.
+  int sectorRetainPadding = max<int>(WorldSectorSize, m_clientConfig.getInt("worldClientSectorRetainPadding", (int)WorldSectorSize * 2));
+  int64_t sectorUnloadPerFrame = max<int64_t>(1, m_clientConfig.getInt("worldClientSectorUnloadPerFrame", 8));
   Set<ClientTileSectorArray::Sector> neededSectors;
   auto monitoredRegions = m_clientState.monitoringRegions([this](EntityId entityId) -> Maybe<RectI> {
       if (auto entity = this->entity(entityId))
@@ -1312,19 +1370,28 @@ void WorldClient::update(float dt) {
       return {};
     });
   for (auto monitoredRegion : monitoredRegions)
-    neededSectors.addAll(m_tileArray->validSectorsFor(monitoredRegion.padded(WorldSectorSize)));
+    neededSectors.addAll(m_tileArray->validSectorsFor(monitoredRegion.padded(sectorRetainPadding)));
 
   auto loadedSectors = m_tileArray->loadedSectors();
+  size_t deferredSectorUnloads = 0;
   for (auto sector : loadedSectors) {
-    if (!neededSectors.contains(sector))
-      m_tileArray->unloadSector(sector);
+    if (!neededSectors.contains(sector)) {
+      if (sectorUnloadPerFrame > 0) {
+        --sectorUnloadPerFrame;
+        m_tileArray->unloadSector(sector);
+      } else {
+        ++deferredSectorUnloads;
+      }
+    }
   }
 
   if (m_collisionDebug)
     renderCollisionDebug();
 
   LogMap::set("client_entities", m_entityMap->size());
-  LogMap::set("client_sectors", toString(loadedSectors.size()));
+  LogMap::set("client_sectors", toString(m_tileArray->loadedSectorCount()));
+  LogMap::set("client_sector_unloads_deferred", toString(deferredSectorUnloads));
+  m_deferredSectorUnloads = deferredSectorUnloads;
   LogMap::set("client_lua_mem", m_luaRoot->luaMemoryUsage());
 }
 
@@ -1488,6 +1555,16 @@ bool WorldClient::waitForLighting(WorldRenderData* renderData) {
     return true;
   }
   return false;
+}
+
+size_t WorldClient::loadedSectorCount() const {
+  if (!m_tileArray)
+    return 0;
+  return m_tileArray->loadedSectorCount();
+}
+
+size_t WorldClient::deferredSectorUnloads() const {
+  return m_deferredSectorUnloads;
 }
 
 WorldClient::BroadcastCallback& WorldClient::broadcastCallback() {
@@ -1880,6 +1957,8 @@ void WorldClient::initWorld(WorldStartPacket const& startPacket) {
 }
 
 void WorldClient::clearWorld() {
+  ++m_renderWorldGeneration;
+
   if (m_entityMap) {
     while (m_entityMap->size() > 0) {
       for (auto entityId : m_entityMap->entityIds())
@@ -1933,6 +2012,7 @@ void WorldClient::clearWorld() {
   m_entityMessageResponses = {};
 
   m_forceRegions.clear();
+  m_deferredSectorUnloads = 0;
 }
 
 void WorldClient::tryGiveMainPlayerItem(ItemPtr item, bool silent) {
@@ -2168,11 +2248,7 @@ bool WorldClient::exposedToWeather(Vec2F const& pos) const {
     return false;
 
   if (!isUnderground(pos) && liquidLevel(Vec2I::floor(pos)).liquid == EmptyLiquidId) {
-    auto assets = Root::singleton().assets();
-    float weatherRayCheckDistance = assets->json("/weather.config:weatherRayCheckDistance").toFloat();
-    float weatherRayCheckWindInfluence = assets->json("/weather.config:weatherRayCheckWindInfluence").toFloat();
-
-    auto offset = Vec2F(-m_weather.wind() * weatherRayCheckWindInfluence, weatherRayCheckDistance).normalized() * weatherRayCheckDistance;
+    auto offset = Vec2F(-m_weather.wind() * m_weatherRayCheckWindInfluence, m_weatherRayCheckDistance).normalized() * m_weatherRayCheckDistance;
 
     return !lineCollision({pos, pos + offset});
   }
@@ -2265,7 +2341,15 @@ bool WorldClient::handleSecretBroadcast(PlayerPtr player, StringView broadcast) 
 
 
 void WorldClient::ClientRenderCallback::addDrawable(Drawable drawable, EntityRenderLayer renderLayer) {
-  drawables[renderLayer].append(std::move(drawable));
+  if (auto layerIndex = drawableLayerIndices.ptr(renderLayer)) {
+    drawables[*layerIndex].second.append(std::move(drawable));
+    return;
+  }
+
+  drawables.append({renderLayer, {}});
+  size_t newLayerIndex = drawables.size() - 1;
+  drawableLayerIndices.set(renderLayer, newLayerIndex);
+  drawables[newLayerIndex].second.append(std::move(drawable));
 }
 
 void WorldClient::ClientRenderCallback::addLightSource(LightSource lightSource) {

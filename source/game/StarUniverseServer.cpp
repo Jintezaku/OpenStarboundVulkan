@@ -1167,24 +1167,27 @@ void UniverseServer::processChat() {
   ReadLocker clientsLocker(m_clientsLock);
 
   for (auto const& p : take(m_pendingChat)) {
-    if (auto clientContext = m_clients.get(p.first)) {
-      for (auto const& chat : p.second) {
-        auto& message = get<0>(chat);
-        auto sendMode = get<1>(chat);
-        auto& data = get<2>(chat);
-        if (clientContext->remoteAddress())
-          Logger::info("Chat: <{}> {}", clientContext->playerName(), message);
+    auto clientContextPtr = m_clients.ptr(p.first);
+    if (!clientContextPtr)
+      continue;
 
-        auto team = m_teamManager->getTeam(clientContext->playerUuid());
-        locker.unlock();
-        if (sendMode == ChatSendMode::Broadcast)
-          m_chatProcessor->broadcast(p.first, message, std::move(data));
-        else if (sendMode == ChatSendMode::Party && team.isValid())
-          m_chatProcessor->message(p.first, MessageContext::Mode::Party, team.value().hex(), message, std::move(data));
-        else
-          m_chatProcessor->message(p.first, MessageContext::Mode::Local, printWorldId(clientContext->playerWorldId()), message, std::move(data));
-        locker.lock();
-      }
+    auto clientContext = *clientContextPtr;
+    for (auto const& chat : p.second) {
+      auto& message = get<0>(chat);
+      auto sendMode = get<1>(chat);
+      auto& data = get<2>(chat);
+      if (clientContext->remoteAddress())
+        Logger::info("Chat: <{}> {}", clientContext->playerName(), message);
+
+      auto team = m_teamManager->getTeam(clientContext->playerUuid());
+      locker.unlock();
+      if (sendMode == ChatSendMode::Broadcast)
+        m_chatProcessor->broadcast(p.first, message, std::move(data));
+      else if (sendMode == ChatSendMode::Party && team.isValid())
+        m_chatProcessor->message(p.first, MessageContext::Mode::Party, team.value().hex(), message, std::move(data));
+      else
+        m_chatProcessor->message(p.first, MessageContext::Mode::Local, printWorldId(clientContext->playerWorldId()), message, std::move(data));
+      locker.lock();
     }
   }
 }

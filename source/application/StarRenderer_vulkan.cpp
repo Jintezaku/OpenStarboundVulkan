@@ -36,6 +36,12 @@ constexpr uint32_t MinFramesInFlight = 2;
 constexpr uint32_t MaxFramesInFlight = 4;
 constexpr VkDeviceSize DefaultUploadBufferSize = 64ull * 1024ull * 1024ull;
 constexpr VkDeviceSize MaxUploadBufferSize = 512ull * 1024ull * 1024ull;
+constexpr uint32_t DefaultTextureDescriptorPoolSets = 32768;
+constexpr uint32_t MinTextureDescriptorPoolSets = 1024;
+constexpr uint32_t MaxTextureDescriptorPoolSets = 262144;
+constexpr uint32_t DefaultTextureDescriptorPoolCount = 8;
+constexpr uint32_t MinTextureDescriptorPoolCount = 1;
+constexpr uint32_t MaxTextureDescriptorPoolCount = 32;
 
 struct QueueFamilySelection {
   Maybe<uint32_t> graphicsFamily;
@@ -106,6 +112,30 @@ String presentModeToString(VkPresentModeKHR mode) {
     return "immediate";
   default:
     return "unknown";
+  }
+}
+
+String swapchainFormatToString(VkFormat format) {
+  switch (format) {
+  case VK_FORMAT_B8G8R8A8_UNORM:
+    return "B8G8R8A8_UNORM";
+  case VK_FORMAT_B8G8R8A8_SRGB:
+    return "B8G8R8A8_SRGB";
+  case VK_FORMAT_R8G8B8A8_UNORM:
+    return "R8G8B8A8_UNORM";
+  case VK_FORMAT_R8G8B8A8_SRGB:
+    return "R8G8B8A8_SRGB";
+  default:
+    return strf("format({})", (int)format);
+  }
+}
+
+String swapchainColorSpaceToString(VkColorSpaceKHR colorSpace) {
+  switch (colorSpace) {
+  case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
+    return "SRGB_NONLINEAR";
+  default:
+    return strf("colorspace({})", (int)colorSpace);
   }
 }
 
@@ -195,6 +225,7 @@ public:
   VkImageView imageView = VK_NULL_HANDLE;
   VkSampler sampler = VK_NULL_HANDLE;
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+  VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 };
 
 class VulkanTextureGroup : public TextureGroup {
@@ -263,6 +294,13 @@ struct VulkanRenderer::Impl {
     Maybe<RectI> scissor;
   };
 
+  struct PreparedDraw {
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    VkRect2D scissor{};
+    uint32_t firstVertex = 0;
+    uint32_t vertexCount = 0;
+  };
+
   explicit Impl(SDL_Window* sdlWindow)
     : window(sdlWindow) {}
 
@@ -282,11 +320,13 @@ struct VulkanRenderer::Impl {
     createUploadResources();
     createSyncObjects();
     recreateSwapchain();
-    Logger::info("Vulkan: staticCommandBuffers={}, transferQueue={}, pipelineCache={} ({})",
+    Logger::info("Vulkan: staticCommandBuffers={}, transferQueue={}, pipelineCache={} ({}), textureDescriptorPools={}x{}",
         useStaticCommandBuffers,
         enableTransferQueue,
         enablePipelineCache,
-        pipelineCachePath.empty() ? "<disabled>" : pipelineCachePath);
+        pipelineCachePath.empty() ? "<disabled>" : pipelineCachePath,
+        textureDescriptorPoolCountLimit,
+        textureDescriptorPoolSets);
   }
 
   void cleanup() {
@@ -970,45 +1010,99 @@ struct VulkanRenderer::Impl {
     layoutInfo.pBindings = &samplerBinding;
     checkVk(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &textureDescriptorSetLayout), "vkCreateDescriptorSetLayout(texture)");
 
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 16384;
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = 16384;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    checkVk(vkCreateDescriptorPool(device, &poolInfo, nullptr, &textureDescriptorPool), "vkCreateDescriptorPool(texture)");
+    textureDescriptorPools.clear();
+    activeTextureDescriptorPool = 0;
+    createTextureDescriptorPool(textureDescriptorPoolSets);
   }
 
   void destroyDescriptorResources() {
     if (device == VK_NULL_HANDLE)
       return;
 
-    if (textureDescriptorPool != VK_NULL_HANDLE) {
-      vkDestroyDescriptorPool(device, textureDescriptorPool, nullptr);
-      textureDescriptorPool = VK_NULL_HANDLE;
+    for (auto& pool : textureDescriptorPools) {
+      if (pool != VK_NULL_HANDLE)
+        vkDestroyDescriptorPool(device, pool, nullptr);
     }
+    textureDescriptorPools.clear();
+    activeTextureDescriptorPool = 0;
     if (textureDescriptorSetLayout != VK_NULL_HANDLE) {
       vkDestroyDescriptorSetLayout(device, textureDescriptorSetLayout, nullptr);
       textureDescriptorSetLayout = VK_NULL_HANDLE;
     }
   }
 
-  VkDescriptorSet createTextureDescriptorSet(VkImageView imageView, VkSampler sampler) {
-    if (textureDescriptorPool == VK_NULL_HANDLE || textureDescriptorSetLayout == VK_NULL_HANDLE)
+  VkDescriptorPool createTextureDescriptorPool(uint32_t descriptorCount) {
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = descriptorCount;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = descriptorCount;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    checkVk(vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool), "vkCreateDescriptorPool(texture)");
+    textureDescriptorPools.push_back(descriptorPool);
+    Logger::info("Vulkan: created texture descriptor pool #{}/{} ({} descriptor sets)",
+        textureDescriptorPools.size(),
+        textureDescriptorPoolCountLimit,
+        descriptorCount);
+    return descriptorPool;
+  }
+
+  std::pair<VkDescriptorSet, VkDescriptorPool> createTextureDescriptorSet(VkImageView imageView, VkSampler sampler) {
+    if (textureDescriptorPools.empty() || textureDescriptorSetLayout == VK_NULL_HANDLE)
       throw RendererException("Vulkan texture descriptor resources are not initialized");
 
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = textureDescriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &textureDescriptorSetLayout;
+    auto tryAllocate = [&](VkDescriptorPool descriptorPool, VkDescriptorSet& descriptorSet) {
+      VkDescriptorSetAllocateInfo allocInfo{};
+      allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+      allocInfo.descriptorPool = descriptorPool;
+      allocInfo.descriptorSetCount = 1;
+      allocInfo.pSetLayouts = &textureDescriptorSetLayout;
+      return vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
+    };
 
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-    checkVk(vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet), "vkAllocateDescriptorSets(texture)");
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    VkResult allocationResult = VK_SUCCESS;
+    bool allocated = false;
+
+    for (size_t i = activeTextureDescriptorPool; i < textureDescriptorPools.size(); ++i) {
+      descriptorPool = textureDescriptorPools[i];
+      allocationResult = tryAllocate(descriptorPool, descriptorSet);
+      if (allocationResult == VK_SUCCESS) {
+        activeTextureDescriptorPool = i;
+        allocated = true;
+        break;
+      }
+      if (allocationResult != VK_ERROR_OUT_OF_POOL_MEMORY && allocationResult != VK_ERROR_FRAGMENTED_POOL)
+        checkVk(allocationResult, "vkAllocateDescriptorSets(texture)");
+    }
+
+    while (!allocated && textureDescriptorPools.size() < textureDescriptorPoolCountLimit) {
+      auto newPool = createTextureDescriptorPool(textureDescriptorPoolSets);
+      allocationResult = tryAllocate(newPool, descriptorSet);
+      if (allocationResult == VK_SUCCESS) {
+        descriptorPool = newPool;
+        activeTextureDescriptorPool = textureDescriptorPools.size() - 1;
+        allocated = true;
+        break;
+      }
+
+      if (allocationResult != VK_ERROR_OUT_OF_POOL_MEMORY && allocationResult != VK_ERROR_FRAGMENTED_POOL)
+        checkVk(allocationResult, "vkAllocateDescriptorSets(texture)");
+    }
+
+    if (!allocated) {
+      throw RendererException::format(
+          "vkAllocateDescriptorSets(texture) exhausted {} descriptor pools ({} sets each)",
+          textureDescriptorPools.size(),
+          textureDescriptorPoolSets);
+    }
 
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1024,7 +1118,7 @@ struct VulkanRenderer::Impl {
     write.pImageInfo = &imageInfo;
 
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-    return descriptorSet;
+    return {descriptorSet, descriptorPool};
   }
 
   void destroyGraphicsPipeline() {
@@ -1242,6 +1336,35 @@ struct VulkanRenderer::Impl {
     }
   }
 
+  void prepareFrameDraws() {
+    preparedDraws.clear();
+    if (frameDraws.empty() || swapchainExtent.width == 0 || swapchainExtent.height == 0)
+      return;
+
+    preparedDraws.reserve(frameDraws.size());
+    RectI fullScissor = RectI::withSize(Vec2I(), Vec2I((int)swapchainExtent.width, (int)swapchainExtent.height));
+    for (auto const& draw : frameDraws) {
+      if (!draw.texture || draw.texture->descriptorSet == VK_NULL_HANDLE || draw.vertexCount == 0)
+        continue;
+
+      RectI scissorRect = draw.scissor.value(fullScissor);
+      int minX = std::clamp(scissorRect.xMin(), 0, (int)swapchainExtent.width);
+      int minY = std::clamp(scissorRect.yMin(), 0, (int)swapchainExtent.height);
+      int maxX = std::clamp(scissorRect.xMax(), 0, (int)swapchainExtent.width);
+      int maxY = std::clamp(scissorRect.yMax(), 0, (int)swapchainExtent.height);
+      if (maxX <= minX || maxY <= minY)
+        continue;
+
+      PreparedDraw preparedDraw;
+      preparedDraw.descriptorSet = draw.texture->descriptorSet;
+      preparedDraw.scissor.offset = {minX, (int)swapchainExtent.height - maxY};
+      preparedDraw.scissor.extent = {(uint32_t)(maxX - minX), (uint32_t)(maxY - minY)};
+      preparedDraw.firstVertex = draw.firstVertex;
+      preparedDraw.vertexCount = draw.vertexCount;
+      preparedDraws.push_back(preparedDraw);
+    }
+  }
+
   VkCommandBuffer beginSingleUseCommands(VkCommandPool commandPool) {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1400,9 +1523,10 @@ struct VulkanRenderer::Impl {
     if (device == VK_NULL_HANDLE)
       return;
 
-    if (texture.descriptorSet != VK_NULL_HANDLE && textureDescriptorPool != VK_NULL_HANDLE) {
-      vkFreeDescriptorSets(device, textureDescriptorPool, 1, &texture.descriptorSet);
+    if (texture.descriptorSet != VK_NULL_HANDLE && texture.descriptorPool != VK_NULL_HANDLE) {
+      vkFreeDescriptorSets(device, texture.descriptorPool, 1, &texture.descriptorSet);
       texture.descriptorSet = VK_NULL_HANDLE;
+      texture.descriptorPool = VK_NULL_HANDLE;
     }
 
     if (texture.sampler != VK_NULL_HANDLE) {
@@ -1453,15 +1577,37 @@ struct VulkanRenderer::Impl {
     return details;
   }
 
-  VkSurfaceFormatKHR chooseSwapSurfaceFormat(std::vector<VkSurfaceFormatKHR> const& availableFormats) {
-    for (auto const& format : availableFormats) {
-      if (format.format == VK_FORMAT_B8G8R8A8_SRGB && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-        return format;
+  VkSurfaceFormatKHR chooseSwapSurfaceFormat(std::vector<VkSurfaceFormatKHR> const& availableFormats, bool preferSrgbSwapchain) {
+    auto matchSrgb = [](VkSurfaceFormatKHR const& format) {
+      return (format.format == VK_FORMAT_B8G8R8A8_SRGB || format.format == VK_FORMAT_R8G8B8A8_SRGB)
+          && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    };
+
+    auto matchUnorm = [](VkSurfaceFormatKHR const& format) {
+      return (format.format == VK_FORMAT_B8G8R8A8_UNORM || format.format == VK_FORMAT_R8G8B8A8_UNORM)
+          && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    };
+
+    if (preferSrgbSwapchain) {
+      for (auto const& format : availableFormats) {
+        if (matchSrgb(format))
+          return format;
+      }
+      for (auto const& format : availableFormats) {
+        if (matchUnorm(format))
+          return format;
+      }
+    } else {
+      for (auto const& format : availableFormats) {
+        if (matchUnorm(format))
+          return format;
+      }
+      for (auto const& format : availableFormats) {
+        if (matchSrgb(format))
+          return format;
+      }
     }
-    for (auto const& format : availableFormats) {
-      if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-        return format;
-    }
+
     return availableFormats.front();
   }
 
@@ -1522,7 +1668,7 @@ struct VulkanRenderer::Impl {
     if (details.formats.empty() || details.presentModes.empty())
       throw RendererException("Vulkan surface has no usable swapchain formats/present modes");
 
-    auto surfaceFormat = chooseSwapSurfaceFormat(details.formats);
+    auto surfaceFormat = chooseSwapSurfaceFormat(details.formats, preferSrgbSwapchain);
     auto presentMode = choosePresentMode(details.presentModes);
     auto extent = chooseSwapExtent(details.capabilities);
 
@@ -1598,6 +1744,10 @@ struct VulkanRenderer::Impl {
         swapchainExtent.height,
         swapchainImages.size(),
         presentModeToString(presentMode));
+    Logger::info("Vulkan: swapchain format={} colorspace={} (preferSrgbSwapchain={})",
+        swapchainFormatToString(surfaceFormat.format),
+        swapchainColorSpaceToString(surfaceFormat.colorSpace),
+        preferSrgbSwapchain);
 
     swapchainDirty = false;
     recreateAfterPresent = false;
@@ -1758,7 +1908,7 @@ struct VulkanRenderer::Impl {
 
     vkCmdBeginRenderPass(commandBuffers[imageIndex], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    if (!frameDraws.empty() && graphicsPipeline != VK_NULL_HANDLE && pipelineLayout != VK_NULL_HANDLE && dynamicVertexBuffer.buffer != VK_NULL_HANDLE) {
+    if (!preparedDraws.empty() && graphicsPipeline != VK_NULL_HANDLE && pipelineLayout != VK_NULL_HANDLE && dynamicVertexBuffer.buffer != VK_NULL_HANDLE) {
       vkCmdBindPipeline(commandBuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
       VkViewport viewport{};
@@ -1776,31 +1926,31 @@ struct VulkanRenderer::Impl {
       VkDeviceSize vertexOffset = 0;
       vkCmdBindVertexBuffers(commandBuffers[imageIndex], 0, 1, &dynamicVertexBuffer.buffer, &vertexOffset);
 
-      for (auto const& draw : frameDraws) {
-        if (!draw.texture || draw.texture->descriptorSet == VK_NULL_HANDLE || draw.vertexCount == 0)
-          continue;
+      VkRect2D boundScissor{};
+      bool hasBoundScissor = false;
+      VkDescriptorSet boundDescriptorSet = VK_NULL_HANDLE;
+      for (auto const& draw : preparedDraws) {
+        if (!hasBoundScissor
+            || boundScissor.offset.x != draw.scissor.offset.x
+            || boundScissor.offset.y != draw.scissor.offset.y
+            || boundScissor.extent.width != draw.scissor.extent.width
+            || boundScissor.extent.height != draw.scissor.extent.height) {
+          vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &draw.scissor);
+          boundScissor = draw.scissor;
+          hasBoundScissor = true;
+        }
 
-        RectI scissorRect = draw.scissor.value(RectI::withSize(Vec2I(), Vec2I((int)swapchainExtent.width, (int)swapchainExtent.height)));
-        int minX = std::clamp(scissorRect.xMin(), 0, (int)swapchainExtent.width);
-        int minY = std::clamp(scissorRect.yMin(), 0, (int)swapchainExtent.height);
-        int maxX = std::clamp(scissorRect.xMax(), 0, (int)swapchainExtent.width);
-        int maxY = std::clamp(scissorRect.yMax(), 0, (int)swapchainExtent.height);
-        if (maxX <= minX || maxY <= minY)
-          continue;
-
-        VkRect2D scissor{};
-        scissor.offset = {minX, (int)swapchainExtent.height - maxY};
-        scissor.extent = {(uint32_t)(maxX - minX), (uint32_t)(maxY - minY)};
-        vkCmdSetScissor(commandBuffers[imageIndex], 0, 1, &scissor);
-
-        vkCmdBindDescriptorSets(commandBuffers[imageIndex],
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipelineLayout,
-            0,
-            1,
-            &draw.texture->descriptorSet,
-            0,
-            nullptr);
+        if (boundDescriptorSet != draw.descriptorSet) {
+          vkCmdBindDescriptorSets(commandBuffers[imageIndex],
+              VK_PIPELINE_BIND_POINT_GRAPHICS,
+              pipelineLayout,
+              0,
+              1,
+              &draw.descriptorSet,
+              0,
+              nullptr);
+          boundDescriptorSet = draw.descriptorSet;
+        }
 
         vkCmdDraw(commandBuffers[imageIndex], draw.vertexCount, 1, draw.firstVertex, 0);
       }
@@ -1814,6 +1964,7 @@ struct VulkanRenderer::Impl {
     if (commandBuffers.empty())
       return;
 
+    prepareFrameDraws();
     for (uint32_t imageIndex = 0; imageIndex < commandBuffers.size(); ++imageIndex) {
       checkVk(vkResetCommandBuffer(commandBuffers[imageIndex], 0), "vkResetCommandBuffer(static)");
       recordCommandBuffer(imageIndex, false);
@@ -1870,7 +2021,8 @@ struct VulkanRenderer::Impl {
     if (!frameActive || frameSyncObjects.empty())
       return;
 
-    if (!frameDraws.empty())
+    prepareFrameDraws();
+    if (!preparedDraws.empty())
       uploadFrameVertices();
     recordCommandBuffer(currentImageIndex, true);
 
@@ -1948,12 +2100,16 @@ struct VulkanRenderer::Impl {
 
   std::vector<VulkanRenderVertex> frameVertices;
   std::vector<DrawSlice> frameDraws;
+  std::vector<PreparedDraw> preparedDraws;
   Maybe<RectI> activeScissor;
   RefPtr<VulkanTexture> whiteTexture;
   std::vector<RefPtr<VulkanTexture>> liveTextures;
 
   VkDescriptorSetLayout textureDescriptorSetLayout = VK_NULL_HANDLE;
-  VkDescriptorPool textureDescriptorPool = VK_NULL_HANDLE;
+  std::vector<VkDescriptorPool> textureDescriptorPools;
+  size_t activeTextureDescriptorPool = 0;
+  uint32_t textureDescriptorPoolSets = DefaultTextureDescriptorPoolSets;
+  uint32_t textureDescriptorPoolCountLimit = DefaultTextureDescriptorPoolCount;
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
   VkPipeline graphicsPipeline = VK_NULL_HANDLE;
   VkShaderModule vertexShaderModule = VK_NULL_HANDLE;
@@ -1977,6 +2133,7 @@ struct VulkanRenderer::Impl {
   bool enablePipelineCache = true;
   bool enableTransferQueue = true;
   String pipelineCachePath = defaultPipelineCachePath();
+  bool preferSrgbSwapchain = false;
   bool preferDiscreteGpu = true;
   String preferredGpuName;
 };
@@ -2098,6 +2255,30 @@ VulkanRenderer::VulkanRenderer(void* platformWindowHandle) {
     }
   }
 
+  if (char const* preferSrgbSwapchainText = std::getenv("STAR_VK_PREFER_SRGB_SWAPCHAIN")) {
+    if (auto parsedPreferSrgbSwapchain = boolFromString(preferSrgbSwapchainText)) {
+      m_impl->preferSrgbSwapchain = *parsedPreferSrgbSwapchain;
+    } else {
+      Logger::warn("Vulkan: invalid STAR_VK_PREFER_SRGB_SWAPCHAIN value '{}', expected true/false", preferSrgbSwapchainText);
+    }
+  }
+
+  if (char const* textureDescriptorSetsText = std::getenv("STAR_VK_TEXTURE_DESCRIPTOR_POOL_SETS")) {
+    if (auto parsedTextureDescriptorSets = parseUint(textureDescriptorSetsText)) {
+      m_impl->textureDescriptorPoolSets = std::clamp(*parsedTextureDescriptorSets, MinTextureDescriptorPoolSets, MaxTextureDescriptorPoolSets);
+    } else {
+      Logger::warn("Vulkan: invalid STAR_VK_TEXTURE_DESCRIPTOR_POOL_SETS value '{}', expected integer", textureDescriptorSetsText);
+    }
+  }
+
+  if (char const* textureDescriptorPoolCountText = std::getenv("STAR_VK_TEXTURE_DESCRIPTOR_POOL_COUNT")) {
+    if (auto parsedTextureDescriptorPoolCount = parseUint(textureDescriptorPoolCountText)) {
+      m_impl->textureDescriptorPoolCountLimit = std::clamp(*parsedTextureDescriptorPoolCount, MinTextureDescriptorPoolCount, MaxTextureDescriptorPoolCount);
+    } else {
+      Logger::warn("Vulkan: invalid STAR_VK_TEXTURE_DESCRIPTOR_POOL_COUNT value '{}', expected integer", textureDescriptorPoolCountText);
+    }
+  }
+
   m_impl->initialize();
 
   int width = 0;
@@ -2189,6 +2370,12 @@ void VulkanRenderer::loadConfig(Json const& config) {
     Logger::warn("Vulkan renderer: enableTransferQueue changed; restart is required to rebuild queue families");
   }
 
+  auto requestedPreferSrgbSwapchain = config.getBool("preferSrgbSwapchain", m_impl->preferSrgbSwapchain);
+  if (requestedPreferSrgbSwapchain != m_impl->preferSrgbSwapchain) {
+    m_impl->preferSrgbSwapchain = requestedPreferSrgbSwapchain;
+    m_impl->swapchainDirty = true;
+  }
+
   auto requestedPreferDiscreteGpu = config.getBool("preferDiscreteGpu", m_impl->preferDiscreteGpu);
   auto requestedPreferredGpuName = config.getString("preferredGpuName", m_impl->preferredGpuName).trim();
   if (requestedPreferDiscreteGpu != m_impl->preferDiscreteGpu || requestedPreferredGpuName != m_impl->preferredGpuName) {
@@ -2226,6 +2413,12 @@ bool VulkanRenderer::switchEffectConfig(String const&) {
 void VulkanRenderer::setScissorRect(Maybe<RectI> const& scissorRect) {
   if (!m_impl)
     return;
+  if (sameScissor(scissorRect, m_impl->activeScissor))
+    return;
+
+  // Preserve scissor assignment for primitives queued so far before switching
+  // to a new clip rect.
+  flush(Mat3F::identity());
   m_impl->activeScissor = scissorRect;
 }
 
@@ -2235,7 +2428,7 @@ TexturePtr VulkanRenderer::createTexture(Image const& texture, TextureAddressing
 
   Image uploadImage = texture;
   if (uploadImage.empty())
-    uploadImage = Image::filled({1, 1}, Vec4B(255, 255, 255, 255), PixelFormat::RGBA32);
+    uploadImage = Image::filled({1, 1}, Vec4B(255, 255, 255, 0), PixelFormat::RGBA32);
   if (uploadImage.pixelFormat() != PixelFormat::RGBA32)
     uploadImage = uploadImage.convert(PixelFormat::RGBA32);
 
@@ -2275,7 +2468,9 @@ TexturePtr VulkanRenderer::createTexture(Image const& texture, TextureAddressing
     samplerInfo.maxLod = 0.0f;
     checkVk(vkCreateSampler(m_impl->device, &samplerInfo, nullptr, &vulkanTexture->sampler), "vkCreateSampler(texture)");
 
-    vulkanTexture->descriptorSet = m_impl->createTextureDescriptorSet(vulkanTexture->imageView, vulkanTexture->sampler);
+    auto descriptorResources = m_impl->createTextureDescriptorSet(vulkanTexture->imageView, vulkanTexture->sampler);
+    vulkanTexture->descriptorSet = descriptorResources.first;
+    vulkanTexture->descriptorPool = descriptorResources.second;
     m_impl->liveTextures.push_back(vulkanTexture);
     return vulkanTexture;
   } catch (...) {
@@ -2317,11 +2512,16 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
     return;
 
   auto appendPrimitiveList = [&](List<RenderPrimitive> const& primitives, Mat3F const& localTransform) {
-    auto appendDrawVertex = [&](RefPtr<VulkanTexture> const& texture, VulkanRenderVertex const& vertex) {
-      auto drawTexture = texture ? texture : m_impl->whiteTexture;
-      if (!drawTexture)
-        return;
+    if (primitives.empty())
+      return;
 
+    m_impl->frameVertices.reserve(m_impl->frameVertices.size() + primitives.size() * 6);
+    m_impl->frameDraws.reserve(m_impl->frameDraws.size() + primitives.size());
+    bool useIdentityTransform = localTransform[0][0] == 1.0f && localTransform[0][1] == 0.0f && localTransform[0][2] == 0.0f
+        && localTransform[1][0] == 0.0f && localTransform[1][1] == 1.0f && localTransform[1][2] == 0.0f
+        && localTransform[2][0] == 0.0f && localTransform[2][1] == 0.0f && localTransform[2][2] == 1.0f;
+
+    auto ensureDrawSlice = [&](RefPtr<VulkanTexture> const& drawTexture) -> VulkanRenderer::Impl::DrawSlice& {
       if (m_impl->frameDraws.empty()
           || m_impl->frameDraws.back().texture.get() != drawTexture.get()
           || !sameScissor(m_impl->frameDraws.back().scissor, m_impl->activeScissor)) {
@@ -2332,31 +2532,64 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
         drawSlice.scissor = m_impl->activeScissor;
         m_impl->frameDraws.push_back(std::move(drawSlice));
       }
-
-      m_impl->frameVertices.push_back(vertex);
-      m_impl->frameDraws.back().vertexCount += 1;
+      return m_impl->frameDraws.back();
     };
 
-    auto appendTriangle = [&](RefPtr<VulkanTexture> const& texture, RenderVertex const& a, RenderVertex const& b, RenderVertex const& c) {
-      appendDrawVertex(texture, convertVertex(a, localTransform, texture));
-      appendDrawVertex(texture, convertVertex(b, localTransform, texture));
-      appendDrawVertex(texture, convertVertex(c, localTransform, texture));
+    auto appendTriangle = [&](VulkanRenderer::Impl::DrawSlice& drawSlice,
+                              float invW,
+                              float invH,
+                              RenderVertex const& a,
+                              RenderVertex const& b,
+                              RenderVertex const& c) {
+      auto appendVertex = [&](RenderVertex const& vertex) {
+        VulkanRenderVertex out{};
+        Vec2F screen = useIdentityTransform ? vertex.screenCoordinate : (localTransform * vertex.screenCoordinate);
+        out.pos[0] = screen[0];
+        out.pos[1] = screen[1];
+        out.uv[0] = vertex.textureCoordinate[0] * invW;
+        out.uv[1] = vertex.textureCoordinate[1] * invH;
+        out.color = vertex.color;
+        m_impl->frameVertices.push_back(out);
+      };
+
+      appendVertex(a);
+      appendVertex(b);
+      appendVertex(c);
+      drawSlice.vertexCount += 3;
     };
 
     for (auto const& primitive : primitives) {
       if (auto tri = primitive.ptr<RenderTriangle>()) {
-        auto texture = asVulkanTexture(tri->texture, m_impl->whiteTexture);
-        appendTriangle(texture, tri->a, tri->b, tri->c);
+        auto drawTexture = asVulkanTexture(tri->texture, m_impl->whiteTexture);
+        if (!drawTexture)
+          continue;
+        Vec2U textureSize = drawTexture->size();
+        float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
+        float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
+        auto& drawSlice = ensureDrawSlice(drawTexture);
+        appendTriangle(drawSlice, invW, invH, tri->a, tri->b, tri->c);
       } else if (auto quad = primitive.ptr<RenderQuad>()) {
-        auto texture = asVulkanTexture(quad->texture, m_impl->whiteTexture);
-        appendTriangle(texture, quad->a, quad->b, quad->c);
-        appendTriangle(texture, quad->a, quad->c, quad->d);
+        auto drawTexture = asVulkanTexture(quad->texture, m_impl->whiteTexture);
+        if (!drawTexture)
+          continue;
+        Vec2U textureSize = drawTexture->size();
+        float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
+        float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
+        auto& drawSlice = ensureDrawSlice(drawTexture);
+        appendTriangle(drawSlice, invW, invH, quad->a, quad->b, quad->c);
+        appendTriangle(drawSlice, invW, invH, quad->a, quad->c, quad->d);
       } else if (auto poly = primitive.ptr<RenderPoly>()) {
         if (poly->vertexes.size() < 3)
           continue;
-        auto texture = asVulkanTexture(poly->texture, m_impl->whiteTexture);
+        auto drawTexture = asVulkanTexture(poly->texture, m_impl->whiteTexture);
+        if (!drawTexture)
+          continue;
+        Vec2U textureSize = drawTexture->size();
+        float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
+        float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
+        auto& drawSlice = ensureDrawSlice(drawTexture);
         for (size_t i = 1; i + 1 < poly->vertexes.size(); ++i)
-          appendTriangle(texture, poly->vertexes[0], poly->vertexes[i], poly->vertexes[i + 1]);
+          appendTriangle(drawSlice, invW, invH, poly->vertexes[0], poly->vertexes[i], poly->vertexes[i + 1]);
       }
     }
   };
@@ -2376,11 +2609,13 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
   if (m_immediatePrimitives.empty())
     return;
 
-  auto appendDrawVertex = [&](RefPtr<VulkanTexture> const& texture, VulkanRenderVertex const& vertex) {
-    auto drawTexture = texture ? texture : m_impl->whiteTexture;
-    if (!drawTexture)
-      return;
+  m_impl->frameVertices.reserve(m_impl->frameVertices.size() + m_immediatePrimitives.size() * 6);
+  m_impl->frameDraws.reserve(m_impl->frameDraws.size() + m_immediatePrimitives.size());
+  bool useIdentityTransform = transformation[0][0] == 1.0f && transformation[0][1] == 0.0f && transformation[0][2] == 0.0f
+      && transformation[1][0] == 0.0f && transformation[1][1] == 1.0f && transformation[1][2] == 0.0f
+      && transformation[2][0] == 0.0f && transformation[2][1] == 0.0f && transformation[2][2] == 1.0f;
 
+  auto ensureDrawSlice = [&](RefPtr<VulkanTexture> const& drawTexture) -> VulkanRenderer::Impl::DrawSlice& {
     if (m_impl->frameDraws.empty()
         || m_impl->frameDraws.back().texture.get() != drawTexture.get()
         || !sameScissor(m_impl->frameDraws.back().scissor, m_impl->activeScissor)) {
@@ -2391,31 +2626,64 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
       drawSlice.scissor = m_impl->activeScissor;
       m_impl->frameDraws.push_back(std::move(drawSlice));
     }
-
-    m_impl->frameVertices.push_back(vertex);
-    m_impl->frameDraws.back().vertexCount += 1;
+    return m_impl->frameDraws.back();
   };
 
-  auto appendTriangle = [&](RefPtr<VulkanTexture> const& texture, RenderVertex const& a, RenderVertex const& b, RenderVertex const& c) {
-    appendDrawVertex(texture, convertVertex(a, transformation, texture));
-    appendDrawVertex(texture, convertVertex(b, transformation, texture));
-    appendDrawVertex(texture, convertVertex(c, transformation, texture));
+  auto appendTriangle = [&](VulkanRenderer::Impl::DrawSlice& drawSlice,
+                            float invW,
+                            float invH,
+                            RenderVertex const& a,
+                            RenderVertex const& b,
+                            RenderVertex const& c) {
+    auto appendVertex = [&](RenderVertex const& vertex) {
+      VulkanRenderVertex out{};
+      Vec2F screen = useIdentityTransform ? vertex.screenCoordinate : (transformation * vertex.screenCoordinate);
+      out.pos[0] = screen[0];
+      out.pos[1] = screen[1];
+      out.uv[0] = vertex.textureCoordinate[0] * invW;
+      out.uv[1] = vertex.textureCoordinate[1] * invH;
+      out.color = vertex.color;
+      m_impl->frameVertices.push_back(out);
+    };
+
+    appendVertex(a);
+    appendVertex(b);
+    appendVertex(c);
+    drawSlice.vertexCount += 3;
   };
 
   for (auto const& primitive : m_immediatePrimitives) {
     if (auto tri = primitive.ptr<RenderTriangle>()) {
-      auto texture = asVulkanTexture(tri->texture, m_impl->whiteTexture);
-      appendTriangle(texture, tri->a, tri->b, tri->c);
+      auto drawTexture = asVulkanTexture(tri->texture, m_impl->whiteTexture);
+      if (!drawTexture)
+        continue;
+      Vec2U textureSize = drawTexture->size();
+      float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
+      float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
+      auto& drawSlice = ensureDrawSlice(drawTexture);
+      appendTriangle(drawSlice, invW, invH, tri->a, tri->b, tri->c);
     } else if (auto quad = primitive.ptr<RenderQuad>()) {
-      auto texture = asVulkanTexture(quad->texture, m_impl->whiteTexture);
-      appendTriangle(texture, quad->a, quad->b, quad->c);
-      appendTriangle(texture, quad->a, quad->c, quad->d);
+      auto drawTexture = asVulkanTexture(quad->texture, m_impl->whiteTexture);
+      if (!drawTexture)
+        continue;
+      Vec2U textureSize = drawTexture->size();
+      float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
+      float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
+      auto& drawSlice = ensureDrawSlice(drawTexture);
+      appendTriangle(drawSlice, invW, invH, quad->a, quad->b, quad->c);
+      appendTriangle(drawSlice, invW, invH, quad->a, quad->c, quad->d);
     } else if (auto poly = primitive.ptr<RenderPoly>()) {
       if (poly->vertexes.size() < 3)
         continue;
-      auto texture = asVulkanTexture(poly->texture, m_impl->whiteTexture);
+      auto drawTexture = asVulkanTexture(poly->texture, m_impl->whiteTexture);
+      if (!drawTexture)
+        continue;
+      Vec2U textureSize = drawTexture->size();
+      float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
+      float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
+      auto& drawSlice = ensureDrawSlice(drawTexture);
       for (size_t i = 1; i + 1 < poly->vertexes.size(); ++i)
-        appendTriangle(texture, poly->vertexes[0], poly->vertexes[i], poly->vertexes[i + 1]);
+        appendTriangle(drawSlice, invW, invH, poly->vertexes[0], poly->vertexes[i], poly->vertexes[i + 1]);
     }
   }
 
@@ -2426,8 +2694,10 @@ void VulkanRenderer::startFrame() {
   if (!m_impl)
     return;
   if (m_impl->beginFrame()) {
+    m_impl->activeScissor = {};
     m_impl->frameVertices.clear();
     m_impl->frameDraws.clear();
+    m_impl->preparedDraws.clear();
   }
 }
 
@@ -2439,6 +2709,7 @@ void VulkanRenderer::finishFrame() {
   m_impl->endFrame();
   m_impl->frameVertices.clear();
   m_impl->frameDraws.clear();
+  m_impl->preparedDraws.clear();
 }
 
 }

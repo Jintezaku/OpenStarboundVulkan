@@ -13,9 +13,13 @@
 
 namespace Star {
 
-struct EntityDrawables {
+using LayerDrawables = pair<EntityRenderLayer, List<Drawable>>;
+
+struct EntityLayerDrawables {
+  EntityRenderLayer layer;
   EntityHighlightEffect highlightEffect;
-  Map<EntityRenderLayer, List<Drawable>> layers;
+  size_t drawablesBegin;
+  size_t drawablesCount;
 };
 
 
@@ -23,13 +27,16 @@ struct WorldRenderData {
   void clear();
 
   WorldGeometry geometry;
+  uint64_t worldRenderGeneration = 0;
 
   Vec2I tileMinPosition;
   RenderTileArray tiles;
   Vec2I lightMinPosition;
   Lightmap lightMap;
 
-  List<EntityDrawables> entityDrawables;
+  List<EntityLayerDrawables> entityLayerDrawables;
+  List<Drawable> entityDrawablesArena;
+  uint64_t entityDrawableCount = 0;
   List<Particle> const* particles;
 
   List<OverheadBar> overheadBars;
@@ -50,7 +57,9 @@ struct WorldRenderData {
 inline void WorldRenderData::clear() {
   tiles.resize({0, 0}); // keep reserved
 
-  entityDrawables.clear();
+  entityLayerDrawables.clear();
+  entityDrawablesArena.clear();
+  entityDrawableCount = 0;
   particles = nullptr;
   overheadBars.clear();
   nametags.clear();

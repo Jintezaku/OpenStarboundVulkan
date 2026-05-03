@@ -29,6 +29,14 @@ endif()
 project(starbound)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/../cmake)
 
+# Presets/scripts may point TMPDIR to a project-local path. Create it early so
+# compiler/linker temp files never fail due to a missing directory.
+foreach(tmp_env TMPDIR TMP TEMP)
+  if(DEFINED ENV{${tmp_env}} AND NOT "$ENV{${tmp_env}}" STREQUAL "")
+    file(MAKE_DIRECTORY "$ENV{${tmp_env}}")
+  endif()
+endforeach()
+
 set(CMAKE_CONFIGURATION_TYPES Debug RelWithAsserts RelWithDebInfo Release)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 set(CMAKE_EXE_LINKER_FLAGS_RELWITHASSERTS "" CACHE STRING "" FORCE)

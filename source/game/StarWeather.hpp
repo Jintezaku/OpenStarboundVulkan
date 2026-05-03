@@ -79,6 +79,8 @@ private:
   double m_currentTime;
   double m_lastWeatherChangeTime;
   double m_nextWeatherChangeTime;
+  double m_weatherCooldownTime;
+  double m_weatherWarmupTime;
 
   List<ProjectilePtr> m_newProjectiles;
 
@@ -127,6 +129,7 @@ private:
 
   double m_currentTime;
   RectI m_visibleRegion;
+  uint64_t m_particleSpawnCap;
 
   List<Particle> m_particles;
   RectF m_lastParticleVisibleRegion;

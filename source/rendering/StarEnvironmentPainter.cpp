@@ -89,8 +89,6 @@ void EnvironmentPainter::renderStars(float pixelRatio, Vec2F const& screenSize, 
         primitives.emplace_back(std::in_place_type_t<RenderQuad>(), texture, screenPos * pixelRatio - Vec2F(texture->size()) / 2, 1.0, color, 0.0f);
     }
   }
-
-  m_renderer->flush();
 }
 
 void EnvironmentPainter::renderDebrisFields(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky) {  
@@ -120,44 +118,40 @@ void EnvironmentPainter::renderDebrisFields(float pixelRatio, Vec2F const& scree
     float debrisXVel = staticRandomFloatRange(spaceDebrisVelocityRange[0], spaceDebrisVelocityRange[1], sky.skyParameters.seed, i, "DebrisFieldXVel");  
     float debrisYVel = staticRandomFloatRange(spaceDebrisVelocityRange[0], spaceDebrisVelocityRange[1], sky.skyParameters.seed, i, "DebrisFieldYVel");  
   
-    // Translate the entire field to make the debris seem as though they are moving  
-    Vec2D velocityOffset = -Vec2D(debrisXVel, debrisYVel) * sky.epochTime;  
-  
-    JsonArray imageOptions = debrisField.query("list").toArray();  
-    Vec2U biggest = Vec2U();  
-    for (Json const& json : imageOptions) {  
-      TexturePtr texture = m_textureGroup->loadTexture(*json.stringPtr());  
-      biggest = biggest.piecewiseMax(texture->size());  
-    }  
-  
-    float screenBuffer = ceil((float)biggest.max() * (float)Constants::sqrt2);  
-    PolyD field = PolyD(RectD::withSize(viewMin + velocityOffset, Vec2D(viewSize)).padded(screenBuffer));  
-    Vec2F debrisAngularVelocityRange = jsonToVec2F(debrisField.query("angularVelocityRange"));  
-    auto debrisItems = m_debrisGenerators[i]->generate(field,  
-        [&](RandomSource& rand) {  
-          StringView debrisImage = *rand.randFrom(imageOptions).stringPtr();  
-          float debrisAngularVelocity = rand.randf(debrisAngularVelocityRange[0], debrisAngularVelocityRange[1]);  
-  
-          return pair<StringView, float>(debrisImage, debrisAngularVelocity);  
-        });  
-  
-    Vec2D debrisPositionOffset = viewMin + velocityOffset;  
-  
-    for (auto& debrisItem : debrisItems) {  
-      Vec2F debrisPosition = rotMatrix.transformVec2(Vec2F(debrisItem.first - debrisPositionOffset));  
-      float debrisAngle = fmod(Constants::deg2rad * debrisItem.second.second * sky.epochTime, Constants::pi * 2) + sky.starRotation;  
-      drawOrbiter(pixelRatio, screenSize, sky, {SkyOrbiterType::SpaceDebris, 1.0f, debrisAngle, debrisItem.second.first, debrisPosition});  
-    }  
+    // Translate the entire field to make the debris seem as though they are moving
+    Vec2D velocityOffset = -Vec2D(debrisXVel, debrisYVel) * sky.epochTime;
+
+    JsonArray imageOptions = debrisField.query("list").toArray();
+    Vec2U biggest = Vec2U();
+    for (Json const& json : imageOptions) {
+      TexturePtr texture = m_textureGroup->loadTexture(*json.stringPtr());
+      biggest = biggest.piecewiseMax(texture->size());
+    }
+
+    float screenBuffer = ceil((float)biggest.max() * (float)Constants::sqrt2);
+    PolyD field = PolyD(RectD::withSize(viewMin + velocityOffset, Vec2D(viewSize)).padded(screenBuffer));
+    Vec2F debrisAngularVelocityRange = jsonToVec2F(debrisField.query("angularVelocityRange"));
+    auto debrisItems = m_debrisGenerators[i]->generate(field,
+        [&](RandomSource& rand) {
+          StringView debrisImage = *rand.randFrom(imageOptions).stringPtr();
+          float debrisAngularVelocity = rand.randf(debrisAngularVelocityRange[0], debrisAngularVelocityRange[1]);
+
+          return pair<StringView, float>(debrisImage, debrisAngularVelocity);
+        });
+
+    Vec2D debrisPositionOffset = viewMin + velocityOffset;
+
+    for (auto& debrisItem : debrisItems) {
+      Vec2F debrisPosition = rotMatrix.transformVec2(Vec2F(debrisItem.first - debrisPositionOffset));
+      float debrisAngle = fmod(Constants::deg2rad * debrisItem.second.second * sky.epochTime, Constants::pi * 2) + sky.starRotation;
+      drawOrbiter(pixelRatio, screenSize, sky, {SkyOrbiterType::SpaceDebris, 1.0f, debrisAngle, debrisItem.second.first, debrisPosition});
+    }
   }  
-  
-  m_renderer->flush();  
 }
 
 void EnvironmentPainter::renderBackOrbiters(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky) {
   for (auto const& orbiter : sky.backOrbiters(screenSize / pixelRatio))
     drawOrbiter(pixelRatio, screenSize, sky, orbiter);
-
-  m_renderer->flush();
 }
 
 void EnvironmentPainter::renderPlanetHorizon(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky) {
@@ -208,15 +202,11 @@ void EnvironmentPainter::renderPlanetHorizon(float pixelRatio, Vec2F const& scre
         rightImage[2], Vec2F(rightTextureSize[0], rightTextureSize[1]),
         rightImage[3], Vec2F(0, rightTextureSize[1]), Vec4B::filled(255), 0.0f);
   }
-
-  m_renderer->flush();
 }
 
 void EnvironmentPainter::renderFrontOrbiters(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky) {
   for (auto const& orbiter : sky.frontOrbiters(screenSize / pixelRatio))
     drawOrbiter(pixelRatio, screenSize, sky, orbiter);
-
-  m_renderer->flush();
 }
 
 void EnvironmentPainter::renderSky(Vec2F const& screenSize, SkyRenderData const& sky) {
@@ -230,8 +220,6 @@ void EnvironmentPainter::renderSky(Vec2F const& screenSize, SkyRenderData const&
   // Flash overlay for Interstellar travel
   Vec4B flashColor = sky.flashColor.toRgba();
   primitives.emplace_back(std::in_place_type_t<RenderQuad>(), RectF(Vec2F(), screenSize), flashColor, 0.0f);
-
-  m_renderer->flush();
 }
 
 // TODO: Fix this to work with decimal zoom levels. Currently, the clouds shake rapidly when interpolating between zoom levels.
@@ -348,8 +336,6 @@ void EnvironmentPainter::renderParallaxLayers(
       }
     }
   }
-
-  m_renderer->flush();
 }
 
 void EnvironmentPainter::cleanup(int64_t textureTimeout) {
@@ -373,8 +359,6 @@ void EnvironmentPainter::drawRays(
         time,
         color,
         alpha);
-
-  m_renderer->flush();
 }
 
 void EnvironmentPainter::drawRay(float pixelRatio,

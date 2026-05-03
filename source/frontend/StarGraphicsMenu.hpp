@@ -25,6 +25,8 @@ private:
   void syncGui();
 
   void apply();
+  bool isVulkanRendererActive() const;
+  void applyRendererSettings();
   void applyWindowSettings();
   
   void displayShaders();

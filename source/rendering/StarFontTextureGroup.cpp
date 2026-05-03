@@ -99,7 +99,8 @@ const FontTextureGroup::GlyphTexture& FontTextureGroup::glyphTexture(String::Cha
 
     glyphTexture.colored |= get<2>(renderResult);
     glyphTexture.offset += Vec2F(get<1>(renderResult));
-    glyphTexture.texture = m_textureGroup->create(image);
+    if (!image.empty())
+      glyphTexture.texture = m_textureGroup->create(image);
   }
 
   glyphTexture.time = Time::monotonicMilliseconds();

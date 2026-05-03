@@ -519,6 +519,8 @@ void TextPainter::renderGlyph(String::Char c, Vec2F const& screenPos, List<Rende
     return;
 
   const FontTextureGroup::GlyphTexture& glyphTexture = m_fontTextureGroup.glyphTexture(c, fontSize, processingDirectives);
+  if (!glyphTexture.texture)
+    return;
   if (glyphTexture.colored)
     color[0] = color[1] = color[2] = 255;
   out.emplace_back(std::in_place_type_t<RenderQuad>(),

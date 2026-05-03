@@ -20,6 +20,8 @@ ServerWeather::ServerWeather() {
   m_currentTime = 0.0;
   m_lastWeatherChangeTime = 0.0;
   m_nextWeatherChangeTime = 0.0;
+  m_weatherCooldownTime = 0.0;
+  m_weatherWarmupTime = 0.0;
 
   m_netGroup.addNetElement(&m_weatherPoolNetState);
   m_netGroup.addNetElement(&m_undergroundLevelNetState);
@@ -42,6 +44,9 @@ void ServerWeather::setup(WeatherPool weatherPool, float undergroundLevel, World
   m_currentTime = 0.0;
   m_lastWeatherChangeTime = 0.0;
   m_nextWeatherChangeTime = 0.0;
+  auto weatherConfig = Root::singleton().assets()->json("/weather.config");
+  m_weatherCooldownTime = weatherConfig.getDouble("weatherCooldownTime");
+  m_weatherWarmupTime = weatherConfig.getDouble("weatherWarmupTime");
 }
 
 void ServerWeather::setReferenceClock(ClockConstPtr referenceClock) {
@@ -84,9 +89,8 @@ void ServerWeather::update(double dt) {
     else
       m_currentWeatherIntensity = 0.0f;
   } else if (!m_weatherPool.empty()) {
-    auto assets = Root::singleton().assets();
-    double weatherCooldownTime = assets->json("/weather.config:weatherCooldownTime").toDouble();
-    double weatherWarmupTime = assets->json("/weather.config:weatherWarmupTime").toDouble();
+    double weatherCooldownTime = m_weatherCooldownTime > 0.0 ? m_weatherCooldownTime : 0.001;
+    double weatherWarmupTime = m_weatherWarmupTime > 0.0 ? m_weatherWarmupTime : 0.001;
 
     if (m_currentTime >= m_nextWeatherChangeTime) {
       m_currentWeatherIndex = m_weatherPool.selectIndex();
@@ -306,6 +310,7 @@ ClientWeather::ClientWeather() {
   m_currentWeatherIntensity = 0.0f;
   m_currentWind = 0.0f;
   m_currentTime = 0.0;
+  m_particleSpawnCap = 1024;
 
   m_netGroup.addNetElement(&m_weatherPoolNetState);
   m_netGroup.addNetElement(&m_undergroundLevelNetState);
@@ -318,6 +323,7 @@ void ClientWeather::setup(WorldGeometry worldGeometry, WeatherEffectsActiveQuery
   m_worldGeometry = worldGeometry;
   m_weatherEffectsActiveQuery = weatherEffectsActiveQuery;
   m_currentTime = 0.0;
+  m_particleSpawnCap = Root::singleton().assets()->json("/weather.config").optUInt("clientWeatherParticleSpawnCap").value(1024);
 }
 
 void ClientWeather::readUpdate(ByteArray data, NetCompatibilityRules rules) {
@@ -384,7 +390,13 @@ void ClientWeather::spawnWeatherParticles(RectF newClientRegion, float dt) {
   if (!m_currentWeatherType)
     return;
 
+  uint64_t frameParticleSpawnCap = m_particleSpawnCap;
+  uint64_t spawnedParticles = 0;
+
   for (auto const& particleConfig : m_currentWeatherType->particles) {
+    if (spawnedParticles >= frameParticleSpawnCap)
+      break;
+
     // Move client region to same wrap region as newClientRegion
     RectF visibleRegion(m_worldGeometry.nearestTo(newClientRegion.min(), m_lastParticleVisibleRegion.min()),
         m_worldGeometry.nearestTo(newClientRegion.min(), m_lastParticleVisibleRegion.max()));
@@ -401,6 +413,9 @@ void ClientWeather::spawnWeatherParticles(RectF newClientRegion, float dt) {
         count = std::ceil(count);
 
       for (int i = 0; i < count; ++i) {
+        if (spawnedParticles >= frameParticleSpawnCap)
+          break;
+
         auto newParticle = particleConfig.particle;
         float x = Random::randf() * renderZone.width() + renderZone.xMin();
         float y = Random::randf() * renderZone.height() + renderZone.yMin();
@@ -410,8 +425,12 @@ void ClientWeather::spawnWeatherParticles(RectF newClientRegion, float dt) {
           if (particleConfig.autoRotate)
             newParticle.rotation += angleChange;
           m_particles.append(std::move(newParticle));
+          ++spawnedParticles;
         }
       }
+
+      if (spawnedParticles >= frameParticleSpawnCap)
+        break;
     }
   }
 

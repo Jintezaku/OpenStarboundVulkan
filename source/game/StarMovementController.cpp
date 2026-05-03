@@ -5,6 +5,7 @@
 #include "StarWorld.hpp"
 #include "StarAssets.hpp"
 #include "StarRandom.hpp"
+#include <cmath>
 
 namespace Star {
 
@@ -545,7 +546,7 @@ void MovementController::tickMaster(float dt) {
       auto body = collisionBody();
 
       float velocityMagnitude = vmag(relativeVelocity);
-      Vec2F velocityDirection = relativeVelocity / velocityMagnitude;
+      Vec2F velocityDirection = velocityMagnitude > 0.0f ? relativeVelocity / velocityMagnitude : Vec2F();
 
       bool ignorePlatforms = *m_parameters.ignorePlatformCollision || relativeVelocity[1] > 0;
       float maximumCorrection = *m_parameters.maximumCorrection;
@@ -719,15 +720,17 @@ void MovementController::forEachMovingCollision(RectF const& region, function<bo
     for (size_t i = 0; i < physicsEntity->movingCollisionCount(); ++i) {
       if (auto mc = physicsEntity->movingCollision(i)) {
         if (mc->categoryFilter.check(m_parameters.physicsEffectCategories.value())) {
-          PolyF poly = std::move(mc->collision);
-          poly.translate(geometry.nearestTo(region.min(), mc->position));
-          RectF polyBounds = poly.boundBox();
+          Vec2F translatedPosition = geometry.nearestTo(region.min(), mc->position);
+          RectF polyBounds = mc->collision.boundBox();
+          polyBounds.translate(translatedPosition);
+          if (!region.intersects(polyBounds))
+            continue;
 
-          if (region.intersects(polyBounds)) {
-            // early exit if the callback returns false
-            if(callback({physicsEntity->entityId(), i}, *mc, poly, polyBounds) == false)
-              return;
-          }
+          PolyF poly = mc->collision;
+          poly.translate(translatedPosition);
+          // early exit if the callback returns false
+          if (!callback({physicsEntity->entityId(), i}, *mc, poly, polyBounds))
+            return;
         }
       }
     }
@@ -866,32 +869,40 @@ MovementController::CollisionResult MovementController::collisionMove(List<Colli
   Vec2F totalCorrection = Vec2F();
   CollisionKind maxCollided = CollisionKind::None;
   Maybe<MovingCollisionId> surfaceMovingCollisionId;
+  float maximumCorrectionSquared = square(maximumCorrection);
+
+  for (auto& cp : collisionPolys)
+    cp.sortDistance = vmagSquared(cp.sortPosition - sortCenter);
+
+  sort(collisionPolys, [](auto const& a, auto const& b) {
+      return a.sortDistance < b.sortDistance;
+    });
 
   CollisionSeparation separation = {};
 
   if (enableSurfaceSlopeCorrection) {
     // First try separating with our ground sliding cheat.
-    separation = collisionSeparate(collisionPolys, checkBody, ignorePlatforms, maximumPlatformCorrection, sortCenter, true, separationTolerance);
+    separation = collisionSeparate(collisionPolys, checkBody, ignorePlatforms, maximumPlatformCorrection, true, separationTolerance);
     totalCorrection += separation.correction;
     checkBody.translate(separation.correction);
     maxCollided = maxOrNullCollision(maxCollided, separation.collisionKind);
     surfaceMovingCollisionId = separation.movingCollisionId;
     Vec2F upwardResult = movement + separation.correction;
-    float upMag = upwardResult.magnitude();
-    // Angle off of horizontal (minimum of either direction)
-    float angleHoriz = std::min(Vec2F(1, 0).angleBetweenNormalized(upwardResult / upMag),
-        Vec2F(-1, 0).angleBetweenNormalized(upwardResult / upMag));
+    float upMagSquared = upwardResult.magnitudeSquared();
 
-    // We need to make sure that even if we found a solution with the sliding
-    // cheat, we are not beyond the angle and correction limits for the ground
-    // cheat correction.
-    if (separation.solutionFound)
-      separation.solutionFound = upMag < SlideCorrectionLimit || angleHoriz < SlideAngle;
-
-    if (separation.solutionFound) {
-      if (totalCorrection.magnitude() > maximumCorrection)
-        separation.solutionFound = false;
+    if (separation.solutionFound && upMagSquared >= square(SlideCorrectionLimit)) {
+      float upInvMag = 1.0f / std::sqrt(upMagSquared);
+      Vec2F upwardResultNorm = upwardResult * upInvMag;
+      // Angle off of horizontal (minimum of either direction)
+      float angleHoriz = std::min(Vec2F(1, 0).angleBetweenNormalized(upwardResultNorm),
+          Vec2F(-1, 0).angleBetweenNormalized(upwardResultNorm));
+      // We need to make sure that even if we found a solution with the sliding
+      // cheat, we are not beyond the angle limit for the ground cheat correction.
+      separation.solutionFound = angleHoriz < SlideAngle;
     }
+
+    if (separation.solutionFound && totalCorrection.magnitudeSquared() > maximumCorrectionSquared)
+      separation.solutionFound = false;
   }
 
   if (!separation.solutionFound) {
@@ -899,13 +910,13 @@ MovementController::CollisionResult MovementController::collisionMove(List<Colli
     totalCorrection = Vec2F();
     for (size_t i = 0; i < MaximumSeparationLoops; ++i) {
       separation = collisionSeparate(collisionPolys, checkBody, ignorePlatforms,
-          maximumPlatformCorrection, sortCenter, false, separationTolerance);
+          maximumPlatformCorrection, false, separationTolerance);
       totalCorrection += separation.correction;
       checkBody.translate(separation.correction);
       maxCollided = maxOrNullCollision(maxCollided, separation.collisionKind);
       surfaceMovingCollisionId = {};
 
-      if (totalCorrection.magnitude() > maximumCorrection) {
+      if (totalCorrection.magnitudeSquared() > maximumCorrectionSquared) {
         separation.solutionFound = false;
         break;
       }
@@ -921,12 +932,12 @@ MovementController::CollisionResult MovementController::collisionMove(List<Colli
     checkBody = body;
     totalCorrection = -movement;
     for (size_t i = 0; i < MaximumSeparationLoops; ++i) {
-      separation = collisionSeparate(collisionPolys, checkBody, true, maximumPlatformCorrection, sortCenter, false, separationTolerance);
+      separation = collisionSeparate(collisionPolys, checkBody, true, maximumPlatformCorrection, false, separationTolerance);
       totalCorrection += separation.correction;
       checkBody.translate(separation.correction);
       maxCollided = maxOrNullCollision(maxCollided, separation.collisionKind);
 
-      if (totalCorrection.magnitude() > maximumCorrection) {
+      if (totalCorrection.magnitudeSquared() > maximumCorrectionSquared) {
         separation.solutionFound = false;
         break;
       }
@@ -989,18 +1000,11 @@ MovementController::CollisionResult MovementController::collisionMove(List<Colli
 }
 
 MovementController::CollisionSeparation MovementController::collisionSeparate(List<CollisionPoly>& collisionPolys, PolyF const& poly,
-    bool ignorePlatforms, float maximumPlatformCorrection, Vec2F const& sortCenter, bool upward, float separationTolerance) {
+    bool ignorePlatforms, float maximumPlatformCorrection, bool upward, float separationTolerance) {
 
   CollisionSeparation separation = {};
   separation.collisionKind = CollisionKind::None;
   bool intersects = false;
-
-  for (auto& cp : collisionPolys)
-    cp.sortDistance = vmagSquared(cp.sortPosition - sortCenter);
-
-  sort(collisionPolys, [](auto const& a, auto const& b) {
-      return a.sortDistance < b.sortDistance;
-    });
 
   PolyF::IntersectResult intersectResult;
   PolyF correctedPoly = poly;

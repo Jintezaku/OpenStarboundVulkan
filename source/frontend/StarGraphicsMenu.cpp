@@ -11,7 +11,50 @@
 #include "StarJsonExtra.hpp"
 #include "StarShadersMenu.hpp"
 
+#include <algorithm>
+#include <exception>
+
 namespace Star {
+
+namespace {
+
+bool isVulkanRendererId(String const& rendererId) {
+  return rendererId.toLower().contains("vulkan");
+}
+
+String rendererConfigPathForRendererId(String const& rendererId) {
+  auto loweredRendererId = rendererId.toLower();
+  if (loweredRendererId.contains("vulkan"))
+    return "/rendering/vulkan.config";
+  if (loweredRendererId.contains("direct3d12"))
+    return "/rendering/direct3d12.config";
+  if (loweredRendererId.contains("metal"))
+    return "/rendering/metal.config";
+  return "/rendering/opengl.config";
+}
+
+Json applyVulkanRendererConfigOverrides(Json rendererConfig, ConfigurationPtr const& configuration) {
+  bool vsyncEnabled = configuration->get("vsync").optBool().value(true);
+  bool lowLatencyPresent = configuration->get("vulkanLowLatencyPresent").optBool().value(true);
+  bool staticCommandBuffers = configuration->get("vulkanStaticCommandBuffers").optBool().value(true);
+  bool enablePipelineCache = configuration->get("vulkanPipelineCache").optBool().value(true);
+  bool enableTransferQueue = configuration->get("vulkanTransferQueue").optBool().value(true);
+  auto framesInFlightValue = std::clamp(configuration->get("vulkanFramesInFlight").optInt().value((int64_t)3), (int64_t)2, (int64_t)4);
+  uint32_t framesInFlight = (uint32_t)framesInFlightValue;
+
+  String presentMode = "fifo";
+  if (!vsyncEnabled)
+    presentMode = lowLatencyPresent ? "mailbox" : "immediate";
+
+  rendererConfig = rendererConfig.set("presentMode", presentMode);
+  rendererConfig = rendererConfig.set("framesInFlight", framesInFlight);
+  rendererConfig = rendererConfig.set("staticCommandBuffers", staticCommandBuffers);
+  rendererConfig = rendererConfig.set("enablePipelineCache", enablePipelineCache);
+  rendererConfig = rendererConfig.set("enableTransferQueue", enableTransferQueue);
+  return rendererConfig;
+}
+
+}
 
 GraphicsMenu::GraphicsMenu(PaneManager* manager,UniverseClientPtr client)
   : m_paneManager(manager) {
@@ -79,6 +122,26 @@ GraphicsMenu::GraphicsMenu(PaneManager* manager,UniverseClientPtr client)
     });
   reader.registerCallback("multiTextureCheckbox", [=](Widget*) {
       m_localChanges.set("useMultiTexturing", fetchChild<ButtonWidget>("multiTextureCheckbox")->isChecked());
+      syncGui();
+    });
+  reader.registerCallback("vsyncCheckbox", [=](Widget*) {
+      m_localChanges.set("vsync", fetchChild<ButtonWidget>("vsyncCheckbox")->isChecked());
+      syncGui();
+    });
+  reader.registerCallback("vulkanLowLatencyCheckbox", [=](Widget*) {
+      m_localChanges.set("vulkanLowLatencyPresent", fetchChild<ButtonWidget>("vulkanLowLatencyCheckbox")->isChecked());
+      syncGui();
+    });
+  reader.registerCallback("vulkanPipelineCacheCheckbox", [=](Widget*) {
+      m_localChanges.set("vulkanPipelineCache", fetchChild<ButtonWidget>("vulkanPipelineCacheCheckbox")->isChecked());
+      syncGui();
+    });
+  reader.registerCallback("vulkanTransferQueueCheckbox", [=](Widget*) {
+      m_localChanges.set("vulkanTransferQueue", fetchChild<ButtonWidget>("vulkanTransferQueueCheckbox")->isChecked());
+      syncGui();
+    });
+  reader.registerCallback("vulkanStaticCommandBuffersCheckbox", [=](Widget*) {
+      m_localChanges.set("vulkanStaticCommandBuffers", fetchChild<ButtonWidget>("vulkanStaticCommandBuffersCheckbox")->isChecked());
       syncGui();
     });
   reader.registerCallback("antiAliasingCheckbox", [=](Widget*) {
@@ -167,7 +230,13 @@ StringList const GraphicsMenu::ConfigKeys = {
   "borderless",
   "limitTextureAtlasSize",
   "useMultiTexturing",
+  "vsync",
   "antiAliasing",
+  "vulkanLowLatencyPresent",
+  "vulkanFramesInFlight",
+  "vulkanPipelineCache",
+  "vulkanTransferQueue",
+  "vulkanStaticCommandBuffers",
   "hardwareCursor",
   "monochromeLighting",
   "newLighting"
@@ -179,6 +248,19 @@ void GraphicsMenu::initConfig() {
   for (auto key : ConfigKeys) {
     m_localChanges.set(key, configuration->get(key));
   }
+
+  if (!m_localChanges.get("vsync").isType(Json::Type::Bool))
+    m_localChanges.set("vsync", true);
+  if (!m_localChanges.get("vulkanLowLatencyPresent").isType(Json::Type::Bool))
+    m_localChanges.set("vulkanLowLatencyPresent", true);
+  if (!m_localChanges.get("vulkanPipelineCache").isType(Json::Type::Bool))
+    m_localChanges.set("vulkanPipelineCache", true);
+  if (!m_localChanges.get("vulkanTransferQueue").isType(Json::Type::Bool))
+    m_localChanges.set("vulkanTransferQueue", true);
+  if (!m_localChanges.get("vulkanStaticCommandBuffers").isType(Json::Type::Bool))
+    m_localChanges.set("vulkanStaticCommandBuffers", true);
+  if (!m_localChanges.get("vulkanFramesInFlight").isType(Json::Type::Int))
+    m_localChanges.set("vulkanFramesInFlight", 3);
 }
 
 void GraphicsMenu::syncGui() {
@@ -235,10 +317,100 @@ void GraphicsMenu::syncGui() {
   fetchChild<ButtonWidget>("borderlessCheckbox")->setChecked(m_localChanges.get("borderless").toBool());
   fetchChild<ButtonWidget>("textureLimitCheckbox")->setChecked(m_localChanges.get("limitTextureAtlasSize").toBool());
   fetchChild<ButtonWidget>("multiTextureCheckbox")->setChecked(m_localChanges.get("useMultiTexturing").optBool().value(true));
+  if (auto vsyncCheckbox = fetchChild<ButtonWidget>("vsyncCheckbox"))
+    vsyncCheckbox->setChecked(m_localChanges.get("vsync").optBool().value(true));
   fetchChild<ButtonWidget>("antiAliasingCheckbox")->setChecked(m_localChanges.get("antiAliasing").toBool());
+  if (auto vulkanLowLatencyCheckbox = fetchChild<ButtonWidget>("vulkanLowLatencyCheckbox"))
+    vulkanLowLatencyCheckbox->setChecked(m_localChanges.get("vulkanLowLatencyPresent").optBool().value(true));
+  if (auto vulkanPipelineCacheCheckbox = fetchChild<ButtonWidget>("vulkanPipelineCacheCheckbox"))
+    vulkanPipelineCacheCheckbox->setChecked(m_localChanges.get("vulkanPipelineCache").optBool().value(true));
+  if (auto vulkanTransferQueueCheckbox = fetchChild<ButtonWidget>("vulkanTransferQueueCheckbox"))
+    vulkanTransferQueueCheckbox->setChecked(m_localChanges.get("vulkanTransferQueue").optBool().value(true));
+  if (auto vulkanStaticCommandBuffersCheckbox = fetchChild<ButtonWidget>("vulkanStaticCommandBuffersCheckbox"))
+    vulkanStaticCommandBuffersCheckbox->setChecked(m_localChanges.get("vulkanStaticCommandBuffers").optBool().value(true));
   fetchChild<ButtonWidget>("monochromeCheckbox")->setChecked(m_localChanges.get("monochromeLighting").toBool());
   fetchChild<ButtonWidget>("newLightingCheckbox")->setChecked(m_localChanges.get("newLighting").optBool().value(true));
   fetchChild<ButtonWidget>("hardwareCursorCheckbox")->setChecked(m_localChanges.get("hardwareCursor").toBool());
+
+  bool vulkanRenderer = isVulkanRendererActive();
+  if (auto antiAliasingLabel = fetchChild<LabelWidget>("antiAliasingLabel"))
+    antiAliasingLabel->setText(vulkanRenderer ? "SUPER-SAMPLED AA (OPENGL)" : "SUPER-SAMPLED AA");
+  if (auto antiAliasingCheckbox = fetchChild<ButtonWidget>("antiAliasingCheckbox"))
+    antiAliasingCheckbox->setEnabled(!vulkanRenderer);
+
+  if (auto vulkanOnlyLabel = fetchChild<LabelWidget>("vulkanLowLatencyLabel"))
+    vulkanOnlyLabel->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyCheckbox = fetchChild<ButtonWidget>("vulkanLowLatencyCheckbox"))
+    vulkanOnlyCheckbox->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyLabel = fetchChild<LabelWidget>("vulkanPipelineCacheLabel"))
+    vulkanOnlyLabel->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyCheckbox = fetchChild<ButtonWidget>("vulkanPipelineCacheCheckbox"))
+    vulkanOnlyCheckbox->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyLabel = fetchChild<LabelWidget>("vulkanTransferQueueLabel"))
+    vulkanOnlyLabel->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyCheckbox = fetchChild<ButtonWidget>("vulkanTransferQueueCheckbox"))
+    vulkanOnlyCheckbox->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyLabel = fetchChild<LabelWidget>("vulkanStaticCommandBuffersLabel"))
+    vulkanOnlyLabel->setVisibility(vulkanRenderer);
+  if (auto vulkanOnlyCheckbox = fetchChild<ButtonWidget>("vulkanStaticCommandBuffersCheckbox"))
+    vulkanOnlyCheckbox->setVisibility(vulkanRenderer);
+}
+
+bool GraphicsMenu::isVulkanRendererActive() const {
+  auto guiContext = GuiContext::singletonPtr();
+  if (!guiContext)
+    return false;
+
+  RendererPtr renderer;
+  try {
+    renderer = guiContext->renderer();
+  } catch (std::exception const&) {
+    return false;
+  }
+
+  return renderer && isVulkanRendererId(renderer->rendererId());
+}
+
+void GraphicsMenu::applyRendererSettings() {
+  auto configuration = Root::singleton().configuration();
+  auto assets = Root::singleton().assets();
+  auto guiContext = GuiContext::singletonPtr();
+  if (!guiContext)
+    return;
+
+  auto appController = guiContext->applicationController();
+  RendererPtr renderer;
+  try {
+    renderer = guiContext->renderer();
+  } catch (std::exception const&) {
+    return;
+  }
+
+  if (!appController || !renderer)
+    return;
+
+  appController->setVSyncEnabled(configuration->get("vsync").optBool().value(true));
+
+  renderer->setSizeLimitEnabled(configuration->get("limitTextureAtlasSize").optBool().value(false));
+  renderer->setMultiTexturingEnabled(configuration->get("useMultiTexturing").optBool().value(true));
+
+  if (isVulkanRendererId(renderer->rendererId()))
+    renderer->setMultiSampling(0);
+  else
+    renderer->setMultiSampling(configuration->get("antiAliasing").optBool().value(false) ? 4 : 0);
+
+  String rendererConfigPath = rendererConfigPathForRendererId(renderer->rendererId());
+  if (!assets->assetExists(rendererConfigPath))
+    rendererConfigPath = "/rendering/opengl.config";
+
+  if (!assets->assetExists(rendererConfigPath))
+    return;
+
+  Json rendererConfig = assets->json(rendererConfigPath);
+  if (isVulkanRendererId(renderer->rendererId()))
+    rendererConfig = applyVulkanRendererConfigOverrides(std::move(rendererConfig), configuration);
+
+  renderer->loadConfig(std::move(rendererConfig));
 }
 
 void GraphicsMenu::apply() {
@@ -246,6 +418,8 @@ void GraphicsMenu::apply() {
   for (auto p : m_localChanges) {
     configuration->set(p.first, p.second);
   }
+
+  applyRendererSettings();
 }
 
 void GraphicsMenu::displayShaders() {

@@ -118,8 +118,8 @@ public:
   void reload();
 
   // Reloads with the given mod sources applied on top of the base mod source
-  // specified in the settings.  Mods in the base mod source will override mods
-  // in the given mod sources
+  // specified in the settings. Mods in the given mod sources will override
+  // mods in the base mod source when priorities tie.
   void loadMods(StringList modDirectories, bool _reload = true);
 
   // Ensures all Root members are loaded without waiting for them to be auto

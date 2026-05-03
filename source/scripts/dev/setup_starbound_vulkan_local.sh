@@ -7,6 +7,9 @@ VULKAN_PRESET="${VULKAN_PRESET:-linux-vulkan-dev}"
 
 echo "Using CMake preset: ${VULKAN_PRESET}"
 
+source "$SCRIPT_DIR/ensure_tmpdir.sh"
+ensure_starbound_tmpdir
+
 if [[ "${SKIP_SYSTEM_PACKAGES:-0}" != "1" ]]; then
   "$SCRIPT_DIR/install_vulkan_toolchain.sh"
 else

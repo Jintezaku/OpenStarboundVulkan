@@ -75,13 +75,15 @@ private:
   // RenderChunkSize results in the coordinate of the lower left most tile in
   // the render chunk.
 
-  static ChunkHash terrainChunkHash(WorldRenderData& renderData, Vec2I chunkIndex);
-  static ChunkHash liquidChunkHash(WorldRenderData& renderData, Vec2I chunkIndex);
+  pair<ChunkHash, ChunkHash> chunkHashes(WorldRenderData& renderData, Vec2I chunkIndex) const;
+  pair<ChunkHash, ChunkHash> cachedChunkHashes(WorldRenderData& renderData, Vec2I chunkIndex, int hashRefreshStrideFrames);
 
   void renderTerrainChunks(WorldCamera const& camera, TerrainLayer terrainLayer);
 
-  shared_ptr<TerrainChunk const> getTerrainChunk(WorldRenderData& renderData, Vec2I chunkIndex);
-  shared_ptr<LiquidChunk const> getLiquidChunk(WorldRenderData& renderData, Vec2I chunkIndex);
+  shared_ptr<TerrainChunk const> buildTerrainChunk(WorldRenderData& renderData, Vec2I chunkIndex);
+  shared_ptr<LiquidChunk const> buildLiquidChunk(WorldRenderData& renderData, Vec2I chunkIndex);
+  shared_ptr<TerrainChunk const> getTerrainChunk(WorldRenderData& renderData, Vec2I chunkIndex, ChunkHash terrainHash, int64_t& terrainBudgetMicros);
+  shared_ptr<LiquidChunk const> getLiquidChunk(WorldRenderData& renderData, Vec2I chunkIndex, ChunkHash liquidHash, int64_t& liquidBudgetMicros);
 
   bool produceTerrainPrimitives(HashMap<QuadZLevel, List<RenderPrimitive>>& primitives,
       TerrainLayer terrainLayer, Vec2I const& pos, WorldRenderData const& renderData);
@@ -98,6 +100,13 @@ private:
   HashTtlCache<TextureKey, TexturePtr, TextureKeyHash> m_textureCache;
   HashTtlCache<pair<Vec2I, ChunkHash>, shared_ptr<TerrainChunk const>> m_terrainChunkCache;
   HashTtlCache<pair<Vec2I, ChunkHash>, shared_ptr<LiquidChunk const>> m_liquidChunkCache;
+  struct CachedChunkHashes {
+    ChunkHash terrainHash;
+    ChunkHash liquidHash;
+  };
+  HashMap<Vec2I, CachedChunkHashes> m_cachedChunkHashes;
+  HashMap<Vec2I, shared_ptr<TerrainChunk const>> m_lastTerrainChunks;
+  HashMap<Vec2I, shared_ptr<LiquidChunk const>> m_lastLiquidChunks;
 
   List<RenderBufferPtr> m_backgroundTerrainBuffers;
   List<RenderBufferPtr> m_midgroundTerrainBuffers;
@@ -108,6 +117,23 @@ private:
 
   Maybe<Vec2F> m_lastCameraCenter;
   Vec2F m_cameraPan;
+  uint8_t m_terrainDamageHashLevelQuantization;
+  uint8_t m_liquidHashLevelQuantization;
+  bool m_enableAdaptiveChunkBuildBudget;
+  int64_t m_baseTerrainChunkBuildBudgetMicros;
+  int64_t m_baseLiquidChunkBuildBudgetMicros;
+  int64_t m_minTerrainChunkBuildBudgetMicros;
+  int64_t m_minLiquidChunkBuildBudgetMicros;
+  double m_chunkBuildBudgetOverloadStartMs;
+  double m_chunkBuildBudgetOverloadMaxMs;
+  double m_setupCostEmaMs;
+  double m_setupCostSmoothing;
+  bool m_enableAdaptiveChunkHashCadence;
+  int m_chunkHashRefreshBaseStrideFrames;
+  int m_chunkHashRefreshMaxStrideFrames;
+  uint64_t m_setupFrameIndex;
+  Maybe<uint64_t> m_cachedWorldRenderGeneration;
+  Maybe<Vec2U> m_cachedWorldSize;
 
   TrackerListenerPtr m_reloadTracker;
 };

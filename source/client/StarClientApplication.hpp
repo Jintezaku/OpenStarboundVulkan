@@ -72,6 +72,175 @@ private:
     PostProcessGroup* group;
   };
 
+  enum class BenchmarkPhase {
+    Disabled,
+    WaitingForWorld,
+    Warmup,
+    AreaSweepPrimary,
+    WarpToShip,
+    AreaSweepShip,
+    WarpToOrbitedWorld,
+    AreaSweepOrbitedWorld,
+    AssetLoadSweep,
+    Finalize,
+    Completed
+  };
+
+  struct BenchmarkFrameSample {
+    double timeSeconds = 0.0;
+    double frameMs = 0.0;
+    double worldClientMs = 0.0;
+    double worldPainterMs = 0.0;
+    double worldTotalMs = 0.0;
+    double interfaceMs = 0.0;
+    double renderFps = 0.0;
+    uint64_t loadedSectors = 0;
+    uint64_t deferredSectorUnloads = 0;
+    String phase;
+    String worldId;
+  };
+
+  struct BenchmarkWarpEvent {
+    String label;
+    String action;
+    String fromWorldId;
+    String toWorldId;
+    double requestedAtSeconds = 0.0;
+    double completedAtSeconds = 0.0;
+    double durationMs = 0.0;
+    bool completed = false;
+    String error;
+  };
+
+  struct BenchmarkSlowAssetSample {
+    String path;
+    String loadType;
+    double loadMs = 0.0;
+    bool success = true;
+    String error;
+  };
+
+  struct BenchmarkAssetTypeStats {
+    uint64_t attempted = 0;
+    uint64_t succeeded = 0;
+    uint64_t failed = 0;
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+  };
+
+  struct BenchmarkState {
+    bool enabled = false;
+    bool running = false;
+    bool completed = false;
+    bool autoQuit = false;
+    bool forceCameraSweep = true;
+    bool assetScanEnabled = true;
+    bool stressMode = false;
+    bool stressPrepared = false;
+    double stressPrepareNotBeforeSeconds = 0.0;
+    bool stressPreWarpRequested = false;
+    double stressPreWarpRetryAtSeconds = 0.0;
+    bool stressForceZoomOut = true;
+    bool stressUseExtendedDurations = true;
+    bool isolateStorage = true;
+    bool requireLateGameWorld = true;
+    bool preferTerrestrialLateGameWorld = true;
+    double lateGameThreatLevel = 6.0;
+    double warmupSeconds = 5.0;
+    double areaPrimarySeconds = 35.0;
+    double areaShipSeconds = 20.0;
+    double areaOrbitedSeconds = 20.0;
+    double warpTimeoutSeconds = 45.0;
+    double cameraAmplitudeTiles = 96.0;
+    double cameraFrequencyHz = 0.22;
+    double areaSettleSeconds = 1.0;
+    double areaPrewarmSweepSeconds = 5.0;
+    uint64_t assetSampleCount = 5000;
+    uint64_t maxSlowAssets = 64;
+    uint64_t minLoadedSectors = 24;
+    bool sampleOnlyReadySectors = true;
+    uint64_t stressItemDrops = 160;
+    uint64_t stressNpcCount = 24;
+    uint64_t stressMonsterCount = 48;
+    uint64_t stressLiquidBursts = 72;
+    double stressAiWaveIntervalSeconds = 3.2;
+    double stressItemWaveIntervalSeconds = 2.4;
+    double stressTerrainPulseIntervalSeconds = 1.15;
+    double stressLiquidPulseIntervalSeconds = 1.75;
+    double stressExplosionPulseIntervalSeconds = 5.0;
+    double stressJumpIntervalSeconds = 1.35;
+    double stressWeatherPulseIntervalSeconds = 22.0;
+    String outputPath;
+
+    double stressNextAiWaveAtSeconds = 0.0;
+    double stressNextItemWaveAtSeconds = 0.0;
+    double stressNextTerrainPulseAtSeconds = 0.0;
+    double stressNextLiquidPulseAtSeconds = 0.0;
+    double stressNextExplosionPulseAtSeconds = 0.0;
+    double stressNextJumpAtSeconds = 0.0;
+    double stressNextWeatherPulseAtSeconds = 0.0;
+    double scenarioNextActionAtSeconds = 0.0;
+    uint64_t scenarioPreparationAttempts = 0;
+    bool stressTerrainRebuildPass = false;
+    bool stressWeatherForceEnabled = true;
+    bool scenarioPlayerReady = false;
+    bool scenarioLateGameReady = false;
+    Maybe<Uuid> scenarioPlayerUuid;
+    Maybe<CelestialCoordinate> lateGameTargetCoordinate;
+    String lateGameTargetWorldId;
+    String benchmarkStorageDirectory;
+    String benchmarkBootConfigPath;
+    Maybe<Vec2I> stressAnchorTile;
+    Maybe<Vec2F> stressCommandAimPosition;
+    MaterialId stressRebuildForeground = StructureMaterialId;
+    MaterialId stressRebuildBackground = StructureMaterialId;
+    LiquidId stressLiquidPrimary = EmptyLiquidId;
+    LiquidId stressLiquidSecondary = EmptyLiquidId;
+    LiquidId stressLiquidTertiary = EmptyLiquidId;
+    uint64_t stressAiWaves = 0;
+    uint64_t stressItemWaves = 0;
+    uint64_t stressTerrainPulses = 0;
+    uint64_t stressLiquidPulses = 0;
+    uint64_t stressExplosionPulses = 0;
+    uint64_t stressJumpPulses = 0;
+    uint64_t stressWeatherPulses = 0;
+    uint64_t stressCommandsIssued = 0;
+    uint64_t stressTerrainTilesDamaged = 0;
+    uint64_t stressTerrainTilesRebuilt = 0;
+    uint64_t stressLiquidTileWrites = 0;
+
+    BenchmarkPhase phase = BenchmarkPhase::Disabled;
+    uint64_t startedAtMonotonicUs = 0;
+    int64_t startedAtEpochMs = 0;
+    double startedAtSeconds = 0.0;
+    double phaseStartedAtSeconds = 0.0;
+    uint64_t frameCount = 0;
+    uint64_t framesOver16Ms = 0;
+    uint64_t framesOver33Ms = 0;
+    uint64_t framesOver50Ms = 0;
+    uint64_t framesOver100Ms = 0;
+    uint64_t framesWithoutWorldTiming = 0;
+    double areaDistanceSweptTiles = 0.0;
+    double assetSweepTotalMs = 0.0;
+    uint64_t assetSweepAttempted = 0;
+    uint64_t assetSweepSucceeded = 0;
+    uint64_t assetSweepFailed = 0;
+    String lastWorldId;
+    String completionReason;
+    bool areaSweepReadyForSampling = false;
+    double areaSweepReadySinceSeconds = 0.0;
+    double areaSweepEnteredAtSeconds = 0.0;
+
+    Maybe<BenchmarkWarpEvent> pendingWarpEvent;
+    List<String> visitedWorldIds;
+    List<BenchmarkWarpEvent> warpEvents;
+    List<BenchmarkFrameSample> frameSamples;
+    StringMap<BenchmarkAssetTypeStats> assetTypeStats;
+    StringMap<uint64_t> assetCatalogCounts;
+    List<BenchmarkSlowAssetSample> slowAssetSamples;
+    List<String> warnings;
+  };
+
   void renderReload();
   void refreshInterfaceScale();
 
@@ -91,7 +260,40 @@ private:
   bool isActionTaken(InterfaceAction action) const;
   bool isActionTakenEdge(InterfaceAction action) const;
 
-  void updateCamera(float dt);
+  void updateCamera(float dt, WorldClientPtr const& worldClient);
+  void parseBenchmarkArgs(StringList& cmdLineArgs);
+  void benchmarkEnterPhase(BenchmarkPhase phase);
+  bool benchmarkPhaseElapsed(double seconds) const;
+  String benchmarkPhaseName(BenchmarkPhase phase) const;
+  void updateBenchmark(float dt, WorldClientPtr const& worldClient);
+  void benchmarkRequestWarp(String label, WarpAction const& action, String actionName);
+  void benchmarkRunAssetLoadSweep();
+  void benchmarkPrepareStressScene();
+  void benchmarkResetStressActions();
+  void benchmarkUpdateStressActions(WorldClientPtr const& worldClient, String const& worldId);
+  void benchmarkStressPlayerMovement(WorldClientPtr const& worldClient, double nowSeconds);
+  void benchmarkStressSpawnAiWave();
+  void benchmarkStressSpawnItemWave();
+  void benchmarkStressTerrainPulse(WorldClientPtr const& worldClient);
+  void benchmarkStressLiquidPulse(WorldClientPtr const& worldClient);
+  void benchmarkStressExplosionPulse(WorldClientPtr const& worldClient);
+  Vec2I benchmarkStressAnchorTile(WorldClientPtr const& worldClient);
+  Vec2F benchmarkStressCommandAim(WorldClientPtr const& worldClient);
+  Vec2F benchmarkStressSpawnPosition(WorldClientPtr const& worldClient);
+  void benchmarkSyncStressCommandAim(WorldClientPtr const& worldClient);
+  bool benchmarkExecuteAtStressAnchor(function<void(WorldServer*, PlayerPtr const&, Vec2F const&)> const& action);
+  bool benchmarkSpawnItemDirect(String const& itemName, uint64_t amount = 1);
+  bool benchmarkSpawnNpcDirect(String const& species, String const& npcType, float level);
+  bool benchmarkSpawnMonsterDirect(String const& monsterType, float level);
+  bool benchmarkSpawnLiquidDirect(String const& liquidName, float quantity);
+  bool benchmarkIssueCommand(String const& command);
+  void benchmarkRecordFrameSample(WorldClientPtr const& worldClient, uint64_t frameUs, uint64_t worldClientUs, uint64_t worldPainterUs, uint64_t worldTotalUs, uint64_t interfaceUs);
+  void benchmarkFinalize(String reason);
+  void benchmarkConfigureIsolatedStorage(StringList& startupArgs);
+  bool benchmarkEnsureScenarioPlayer();
+  void benchmarkConfigureScenarioPlayer(PlayerPtr const& player);
+  bool benchmarkEnsureLateGameWorld(WorldClientPtr const& worldClient, String const& worldId);
+  Maybe<CelestialCoordinate> benchmarkFindLateGameWorld();
 
   RootUPtr m_root;
   ThreadFunction<void> m_rootLoader;
@@ -154,6 +356,7 @@ private:
   ByteArray m_immediateFont;
 
   bool m_loggedUGCCheck;
+  BenchmarkState m_benchmark;
 };
 
 }

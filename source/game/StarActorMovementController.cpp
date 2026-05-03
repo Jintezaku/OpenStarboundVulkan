@@ -1362,21 +1362,21 @@ bool PathController::validateEdge(ActorMovementController& movementController, P
   auto const solidCollision = CollisionSet{ CollisionKind::Null, CollisionKind::Block, CollisionKind::Slippery };
 
   auto const openDoors = [&](RectF const& bounds) {
-  auto objects = m_world->entityQuery(bounds, entityTypeFilter<Object>());
-  auto opened = objects.filtered([&](EntityPtr const& e) -> bool {
-      if (auto object = as<Object>(e)) {
-        if (object->isMaster()) {
-          auto arg = m_world->luaRoot()->luaEngine().createString("closedDoor");
-          auto res = object->callScript("hasCapability", LuaVariadic<LuaValue>{arg});
-          if (res && res->is<LuaBoolean>() && res->get<LuaBoolean>()){
-            m_world->sendEntityMessage(e->entityId(), "openDoor");
-            return true;
-          }
+    auto capabilityArg = m_world->luaRoot()->luaEngine().createString("closedDoor");
+    bool openedAny = false;
+    for (auto const& entity : m_world->entityQuery(bounds, entityTypeFilter<Object>())) {
+      if (auto object = as<Object>(entity)) {
+        if (!object->isMaster())
+          continue;
+
+        auto res = object->callScript("hasCapability", LuaVariadic<LuaValue>{capabilityArg});
+        if (res && res->is<LuaBoolean>() && res->get<LuaBoolean>()) {
+          m_world->sendEntityMessage(entity->entityId(), "openDoor");
+          openedAny = true;
         }
       }
-      return false;
-    });
-    return !opened.empty();
+    }
+    return openedAny;
   };
 
   auto poly = movementController.collisionPoly();

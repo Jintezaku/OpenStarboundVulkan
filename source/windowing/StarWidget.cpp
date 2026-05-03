@@ -63,6 +63,8 @@ bool Widget::setupDrawRegion(RectI const& region) {
     scissorRect = noScissor();
   }
   m_drawingArea = scissorRect.limited(region);
+  if (m_context)
+    m_drawingArea = m_drawingArea.limited(RectI(Vec2I(), Vec2I(m_context->windowInterfaceSize())));
   if (m_drawingArea.isEmpty())
     return false;
 

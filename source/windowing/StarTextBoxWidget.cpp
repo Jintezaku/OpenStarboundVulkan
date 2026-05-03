@@ -33,6 +33,15 @@ TextBoxWidget::TextBoxWidget(String const& startingText, String const& hint, Wid
 }
 
 void TextBoxWidget::renderImpl() {
+  // Always clip textbox drawing to the textbox bounds so long strings cannot
+  // bleed outside their field even if container scissoring is disabled by UI config.
+  RectI textClipArea = screenBoundRect().limited(m_drawingArea);
+  if (m_context)
+    textClipArea = textClipArea.limited(RectI(Vec2I(), Vec2I(m_context->windowInterfaceSize())));
+  if (textClipArea.isEmpty())
+    return;
+  context()->setInterfaceScissorRect(textClipArea);
+
   float blueRate = 0;
   if (m_isHover && !m_isPressed)
     blueRate = 0.2f;

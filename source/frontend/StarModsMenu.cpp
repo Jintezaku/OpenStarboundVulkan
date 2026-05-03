@@ -87,10 +87,16 @@ void ModsMenu::update(float dt) {
 }
 
 String ModsMenu::bestModName(JsonObject const& metadata, String const& sourcePath) {
-  if (auto ptr = metadata.ptr("friendlyName"))
-    return ptr->toString();
-  if (auto ptr = metadata.ptr("name"))
-    return ptr->toString();
+  if (auto ptr = metadata.ptr("friendlyName")) {
+    auto name = ptr->toString().trim();
+    if (!name.empty())
+      return name;
+  }
+  if (auto ptr = metadata.ptr("name")) {
+    auto name = ptr->toString().trim();
+    if (!name.empty())
+      return name;
+  }
   String baseName = File::baseName(sourcePath);
   if (baseName.contains("."))
     baseName.rextract(".");

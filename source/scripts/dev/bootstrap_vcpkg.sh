@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}"
 
+source "$SCRIPT_DIR/ensure_tmpdir.sh"
+ensure_starbound_tmpdir
+
 if [[ ! -x "$VCPKG_ROOT/vcpkg" ]]; then
   if [[ ! -d "$VCPKG_ROOT" ]]; then
     git clone https://github.com/microsoft/vcpkg "$VCPKG_ROOT"

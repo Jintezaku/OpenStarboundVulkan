@@ -23,7 +23,7 @@ PcPlatformServicesState::PcPlatformServicesState()
 #endif
 
 #ifdef STAR_ENABLE_STEAM_INTEGRATION
-  bool shouldLoadSteam = true;
+  bool shouldLoadSteam = !platformEnvEnabled("OPENSTARBOUND_DISABLE_STEAM");
 
   #ifdef STAR_SYSTEM_LINUX
   // Flatpak doesn't create ~/.steam by default, which prevents
@@ -34,7 +34,9 @@ PcPlatformServicesState::PcPlatformServicesState()
   //
   // We'll determine if the user is using Flatpak for Steam here,
   // so we can warn them about such issues.
-  shouldLoadSteam = true;
+  //
+  // Respect explicit env-based disabling (OPENSTARBOUND_DISABLE_STEAM)
+  // instead of force-enabling Steam on Linux.
 
   bool steamFlatpakInstalled = false;
 
@@ -72,6 +74,10 @@ PcPlatformServicesState::PcPlatformServicesState()
     SteamErrMsg errMsg;
     if (SteamAPI_InitEx(&errMsg) == k_ESteamAPIInitResult_OK) {
       steamAvailable = true;
+      steamCallbacksEnabled = SteamAPI_IsSteamRunning();
+      if (!steamCallbacksEnabled) {
+        Logger::warn("Steam client is not running; disabling Steam callbacks for this session");
+      }
       Logger::info("Initialized Steam platform services");
     } else {
       Logger::info("Failed to initialize Steam platform services: {}", errMsg);
@@ -230,7 +236,8 @@ bool PcPlatformServices::overlayActive() const {
 
 void PcPlatformServices::update() {
 #ifdef STAR_ENABLE_STEAM_INTEGRATION
-  SteamAPI_RunCallbacks();
+  if (m_state->steamAvailable && m_state->steamCallbacksEnabled)
+    SteamAPI_RunCallbacks();
 #endif
 }
 

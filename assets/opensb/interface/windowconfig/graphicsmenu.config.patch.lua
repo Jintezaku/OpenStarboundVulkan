@@ -43,14 +43,38 @@ function patch(config)
   for i = 1, 17 do config.interfaceScaleList[i + 1] = 0.75 + i / 4 end
 
   -- Create anti-aliasing toggle
-  shift(clone(layout, "multiTextureLabel", "antiAliasingLabel"), 98).value = "SUPER-SAMPLED AA"
+  local antiAliasingLabel = shift(clone(layout, "multiTextureLabel", "antiAliasingLabel"), 88)
+  antiAliasingLabel.value = "SUPERSAMPLED AA"
+  antiAliasingLabel.fontSize = 7
   shift(clone(layout, "multiTextureCheckbox", "antiAliasingCheckbox"), 99)
   -- Create new lighting toggle
   shift(clone(layout, "multiTextureLabel", "newLightingLabel"), 0, -11).value = "NEW LIGHTING"
   shift(clone(layout, "multiTextureCheckbox", "newLightingCheckbox"), 0, -11)
   -- Create hardware cursor toggle
-  shift(clone(layout, "multiTextureLabel", "hardwareCursorLabel"), 98, -11).value = "HARDWARE CURSOR"
+  local hardwareCursorLabel = shift(clone(layout, "multiTextureLabel", "hardwareCursorLabel"), 88, -11)
+  hardwareCursorLabel.value = "HARDWARE CURSOR"
+  hardwareCursorLabel.fontSize = 7
   shift(clone(layout, "multiTextureCheckbox", "hardwareCursorCheckbox"), 99, -11)
+
+  -- Create advanced renderer toggles
+  shift(clone(layout, "multiTextureLabel", "vsyncLabel"), 0, -22).value = "VSYNC"
+  shift(clone(layout, "multiTextureCheckbox", "vsyncCheckbox"), 0, -22)
+
+  local vulkanLowLatencyLabel = shift(clone(layout, "multiTextureLabel", "vulkanLowLatencyLabel"), 88, -22)
+  vulkanLowLatencyLabel.value = "LOW LATENCY"
+  vulkanLowLatencyLabel.fontSize = 7
+  shift(clone(layout, "multiTextureCheckbox", "vulkanLowLatencyCheckbox"), 99, -22)
+
+  shift(clone(layout, "multiTextureLabel", "vulkanPipelineCacheLabel"), 0, -33).value = "VULKAN PIPELINE CACHE"
+  shift(clone(layout, "multiTextureCheckbox", "vulkanPipelineCacheCheckbox"), 0, -33)
+
+  local vulkanTransferQueueLabel = shift(clone(layout, "multiTextureLabel", "vulkanTransferQueueLabel"), 88, -33)
+  vulkanTransferQueueLabel.value = "XFER QUEUE"
+  vulkanTransferQueueLabel.fontSize = 7
+  shift(clone(layout, "multiTextureCheckbox", "vulkanTransferQueueCheckbox"), 99, -33)
+
+  shift(clone(layout, "multiTextureLabel", "vulkanStaticCommandBuffersLabel"), 0, -44).value = "STATIC COMMAND BUFFERS"
+  shift(clone(layout, "multiTextureCheckbox", "vulkanStaticCommandBuffersCheckbox"), 0, -44)
   
   -- Create shader menu button
   shift(moveto(clone(layout, "accept", "showShadersMenu"), layout.interfaceScaleSlider), 112, -2).caption = "Shaders"

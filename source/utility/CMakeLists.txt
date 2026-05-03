@@ -56,20 +56,20 @@ TARGET_LINK_LIBRARIES (make_versioned_json ${STAR_EXT_LIBS})
 #  fix_embedded_tilesets.cpp)
 #TARGET_LINK_LIBRARIES (fix_embedded_tilesets ${STAR_EXT_LIBS})
 
-#ADD_EXECUTABLE (world_benchmark
-#  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>
-#  world_benchmark.cpp)
-#TARGET_LINK_LIBRARIES (world_benchmark ${STAR_EXT_LIBS})
+ADD_EXECUTABLE (world_benchmark
+  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>
+  world_benchmark.cpp)
+TARGET_LINK_LIBRARIES (world_benchmark ${STAR_EXT_LIBS})
 
-#ADD_EXECUTABLE (generation_benchmark
-#  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>
-#  generation_benchmark.cpp)
-#TARGET_LINK_LIBRARIES (generation_benchmark ${STAR_EXT_LIBS})
+ADD_EXECUTABLE (generation_benchmark
+  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>
+  generation_benchmark.cpp)
+TARGET_LINK_LIBRARIES (generation_benchmark ${STAR_EXT_LIBS})
 
-#ADD_EXECUTABLE (dungeon_generation_benchmark
-#  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>
-#  dungeon_generation_benchmark.cpp)
-#TARGET_LINK_LIBRARIES (dungeon_generation_benchmark ${STAR_EXT_LIBS})
+ADD_EXECUTABLE (dungeon_generation_benchmark
+  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>
+  dungeon_generation_benchmark.cpp)
+TARGET_LINK_LIBRARIES (dungeon_generation_benchmark ${STAR_EXT_LIBS})
 
 #ADD_EXECUTABLE (map_grep
 #  $<TARGET_OBJECTS:star_extern> $<TARGET_OBJECTS:star_core> $<TARGET_OBJECTS:star_base> $<TARGET_OBJECTS:star_game>

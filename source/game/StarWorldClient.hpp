@@ -177,6 +177,8 @@ public:
   void collectLiquid(List<Vec2I> const& tilePositions, LiquidId liquidId);
 
   bool waitForLighting(WorldRenderData* renderData = nullptr);
+  size_t loadedSectorCount() const;
+  size_t deferredSectorUnloads() const;
 
   typedef std::function<bool(PlayerPtr, StringView)> BroadcastCallback;
   BroadcastCallback& broadcastCallback();
@@ -194,7 +196,8 @@ private:
     void addTilePreview(PreviewTile preview) override;
     void addOverheadBar(OverheadBar bar) override;
 
-    Map<EntityRenderLayer, List<Drawable>> drawables;
+    List<LayerDrawables> drawables;
+    HashMap<EntityRenderLayer, size_t> drawableLayerIndices;
     List<LightSource> lightSources;
     List<Particle> particles;
     List<AudioInstancePtr> audios;
@@ -259,6 +262,11 @@ private:
   void setupForceRegions();
 
   Json m_clientConfig;
+  float m_interactivePulseAmount;
+  float m_interactivePulseRate;
+  float m_inspectionFlickerAmount;
+  float m_weatherRayCheckDistance;
+  float m_weatherRayCheckWindInfluence;
   WorldTemplatePtr m_worldTemplate;
   WorldStructure m_centralStructure;
   Vec2F m_playerStart;
@@ -272,6 +280,7 @@ private:
   LuaRootPtr m_luaRoot;
 
   WorldGeometry m_geometry;
+  uint64_t m_renderWorldGeneration = 0;
   uint64_t m_currentStep;
   double m_currentTime;
   bool m_fullBright;
@@ -384,6 +393,8 @@ private:
 
   // used to keep track of already-printed stack traces caused by remote entities, so they don't clog the log
   HashSet<uint64_t> m_entityExceptionsLogged;
+
+  size_t m_deferredSectorUnloads;
 };
 
 }

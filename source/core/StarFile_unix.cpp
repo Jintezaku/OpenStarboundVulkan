@@ -30,6 +30,12 @@ namespace {
   void* handleFromFd(int handle) {
     return (void*)(intptr_t)handle;
   }
+
+  String tempDirectoryRoot() {
+    if (char const* envTmp = ::getenv("TMPDIR"))
+      return String(envTmp);
+    return String(P_tmpdir);
+  }
 }
 
 String File::convertDirSeparators(String const& path) {
@@ -123,7 +129,7 @@ String File::fullPath(const String& fileName) {
 }
 
 String File::temporaryFileName() {
-  return relativeTo(P_tmpdir, strf("starbound.tmpfile.{}", hexEncode(Random::randBytes(16))));
+  return relativeTo(tempDirectoryRoot(), strf("starbound.tmpfile.{}", hexEncode(Random::randBytes(16))));
 }
 
 FilePtr File::temporaryFile() {
@@ -132,7 +138,7 @@ FilePtr File::temporaryFile() {
 
 FilePtr File::ephemeralFile() {
   auto file = make_shared<File>();
-  ByteArray path = ByteArray::fromCStringWithNull(relativeTo(P_tmpdir, "starbound.tmpfile.XXXXXXXX").utf8Ptr());
+  ByteArray path = ByteArray::fromCStringWithNull(relativeTo(tempDirectoryRoot(), "starbound.tmpfile.XXXXXXXX").utf8Ptr());
   auto res = mkstemp(path.ptr());
   if (res < 0)
     throw IOException::format("tmpfile error: {}", strerror(errno));
@@ -144,7 +150,7 @@ FilePtr File::ephemeralFile() {
 }
 
 String File::temporaryDirectory() {
-  String dirname = relativeTo(P_tmpdir, strf("starbound.tmpdir.{}", hexEncode(Random::randBytes(16))));
+  String dirname = relativeTo(tempDirectoryRoot(), strf("starbound.tmpdir.{}", hexEncode(Random::randBytes(16))));
   makeDirectory(dirname);
   return dirname;
 }

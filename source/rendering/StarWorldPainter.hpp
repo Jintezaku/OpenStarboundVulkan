@@ -32,7 +32,7 @@ private:
   void renderParticles(WorldRenderData& renderData, Particle::Layer layer);
   void renderBars(WorldRenderData& renderData);
 
-  void drawEntityLayer(List<Drawable> drawables, EntityHighlightEffect highlightEffect = EntityHighlightEffect());
+  void drawEntityLayer(List<Drawable>& drawableArena, size_t drawablesBegin, size_t drawablesCount, EntityHighlightEffect highlightEffect = EntityHighlightEffect());
 
   void drawDrawable(Drawable drawable);
   void drawDrawableSet(List<Drawable>& drawable);
@@ -48,6 +48,7 @@ private:
 
   Json m_highlightConfig;
   Map<EntityHighlightEffectType, pair<Directives, Directives>> m_highlightDirectives;
+  float m_maxHighlightLevel;
 
   Vec2F m_entityBarOffset;
   Vec2F m_entityBarSpacing;
@@ -58,6 +59,7 @@ private:
 
   AssetsConstPtr m_assets;
   RectF m_worldScreenRect;
+  RectF m_worldCoarseCullRect;
 
   Vec2F m_previousCameraCenter;
   Vec2F m_parallaxWorldPosition;
@@ -66,9 +68,22 @@ private:
   float m_lightMapMultiplier;
   int m_textParticleFontSize;
   int m_particleRenderWindowPadding;
+  uint64_t m_particleRenderCapPerLayer;
+  uint64_t m_particleRenderCapPerLayerMin;
+  float m_particleAdaptiveBudgetFrameMs;
+  uint64_t m_drawableCullBypassThreshold;
+  float m_drawableCullBypassMaxFrameMs;
+  float m_drawableWorldCoarseCullPadding;
+  bool m_skipDrawableCulling;
   int64_t m_textureTimeout;
   int64_t m_nextCleanupTime;
   int64_t m_cacheCleanupInterval;
+  uint8_t m_cacheCleanupPhase;
+  float m_previousFrameRenderMs;
+
+  List<Particle const*> m_backParticles;
+  List<Particle const*> m_middleParticles;
+  List<Particle const*> m_frontParticles;
 
   TrackerListenerPtr m_reloadTracker;
 };

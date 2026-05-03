@@ -303,11 +303,12 @@ void Root::reload() {
 }
 
 void Root::loadMods(StringList modDirectories, bool _reload) {
-  // Need to clear mod directories because there was an update for UGC, which have been added already as it assumes an update isn't needed.  
+  MutexLocker locker(m_modsMutex);
+  // Need to clear mod directories because there was an update for UGC, which
+  // have been added already as it assumes an update isn't needed.
   if (_reload)
     m_modDirectories.clear();
 
-  MutexLocker locker(m_modsMutex);
   m_modDirectories = std::move(modDirectories);
   
   if (_reload)
@@ -388,8 +389,17 @@ String Root::toStoragePath(String const& path) const {
 
 AssetsConstPtr Root::assets() {
   return loadMemberFunction<Assets>(m_assets, m_assetsMutex, "Assets", [this]() {
+      StringList modDirectories;
+      {
+        MutexLocker locker(m_modsMutex);
+        modDirectories = m_modDirectories;
+      }
+
+      // Dynamic mod directories (Steam UGC) are applied on top of configured
+      // asset directories. Duplicates with equal priority are resolved in
+      // favor of the later-scanned source.
       StringList assetDirectories = m_settings.assetDirectories;
-      assetDirectories.appendAll(m_modDirectories);
+      assetDirectories.appendAll(modDirectories);
       StringList assetSources = scanForAssetSources(assetDirectories, m_settings.assetSources);
 
       auto assets = make_shared<Assets>(m_settings.assetsSettings, assetSources);
@@ -609,9 +619,13 @@ StringList Root::scanForAssetSources(StringList const& directories, StringList c
     auto name = File::baseName(sourcePath);
     if (name.beginsWith(".") || name.beginsWith("_"))
       Logger::info("Root: Skipping hidden '{}' in asset directory", name);
-    else if (isDirectory)
-      source = make_shared<DirectoryAssetSource>(sourcePath);
-    else if (sourcePath.endsWith(".pak"))
+    else if (isDirectory) {
+      String contentsPack = File::relativeTo(sourcePath, "contents.pak");
+      if (File::isFile(contentsPack))
+        source = make_shared<PackedAssetSource>(contentsPack);
+      else
+        source = make_shared<DirectoryAssetSource>(sourcePath);
+    } else if (sourcePath.endsWith(".pak"))
       source = make_shared<PackedAssetSource>(sourcePath);
     else
       Logger::warn("Root: Unrecognized file in asset directory '{}', skipping", name);
@@ -624,6 +638,8 @@ StringList Root::scanForAssetSources(StringList const& directories, StringList c
     auto assetSource = make_shared<AssetSource>();
     assetSource->path = sourcePath;
     assetSource->name = metadata.maybe("name").apply(mem_fn(&Json::toString));
+    if (!assetSource->name)
+      assetSource->name = name;
     assetSource->version = metadata.maybe("version").apply(mem_fn(&Json::printString));
     assetSource->priority = metadata.value("priority", 0.0f).toFloat();
     assetSource->requires_ = jsonToStringList(metadata.value("requires", JsonArray{}));
@@ -637,12 +653,12 @@ StringList Root::scanForAssetSources(StringList const& directories, StringList c
     if (assetSource->name) {
       if (auto oldAssetSource = namedSources.value(*assetSource->name)) {
         if (oldAssetSource->priority <= assetSource->priority) {
-          Logger::warn("Root: Overriding duplicate asset source '{}' named '{}' with higher or equal priority source '{}",
+          Logger::warn("Root: Overriding duplicate asset source '{}' named '{}' with higher or equal priority source '{}'",
               oldAssetSource->path, *assetSource->name, assetSource->path);
           *oldAssetSource = *assetSource;
         } else {
           Logger::warn("Root: Skipping duplicate asset source '{}' named '{}', previous source '{}' has higher priority",
-              assetSource->path, *assetSource->name, oldAssetSource->priority);
+              assetSource->path, *assetSource->name, oldAssetSource->path);
         }
       } else {
         namedSources[*assetSource->name] = assetSource;

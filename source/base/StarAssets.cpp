@@ -375,9 +375,13 @@ Assets::Assets(Settings settings, StringList assetSources) {
   for (auto& sourcePath : m_assetSources) {
     Logger::info("Loading assets from: '{}'", sourcePath);
     AssetSourcePtr source;
-    if (File::isDirectory(sourcePath))
-      source = std::make_shared<DirectoryAssetSource>(sourcePath, m_settings.pathIgnore);
-    else
+    if (File::isDirectory(sourcePath)) {
+      String contentsPack = File::relativeTo(sourcePath, "contents.pak");
+      if (File::isFile(contentsPack))
+        source = std::make_shared<PackedAssetSource>(contentsPack);
+      else
+        source = std::make_shared<DirectoryAssetSource>(sourcePath, m_settings.pathIgnore);
+    } else
       source = std::make_shared<PackedAssetSource>(sourcePath);
 
     addSource(sourcePath, source);

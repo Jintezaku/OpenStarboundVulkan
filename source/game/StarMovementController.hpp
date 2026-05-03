@@ -244,7 +244,7 @@ private:
   static CollisionResult collisionMove(List<CollisionPoly>& collisionPolys, PolyF const& body, Vec2F const& movement,
       bool ignorePlatforms, bool enableSurfaceSlopeCorrection, float maximumCorrection, float maximumPlatformCorrection, Vec2F sortCenter, float dt);
   static CollisionSeparation collisionSeparate(List<CollisionPoly>& collisionPolys, PolyF const& poly,
-      bool ignorePlatforms, float maximumPlatformCorrection, Vec2F const& sortCenter, bool upward, float separationTolerance);
+      bool ignorePlatforms, float maximumPlatformCorrection, bool upward, float separationTolerance);
 
   void updateParameters(MovementParameters parameters);
   void updatePositionInterpolators();

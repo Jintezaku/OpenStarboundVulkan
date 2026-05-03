@@ -21,8 +21,14 @@ enc_temp_folder/
 /assets/user/
 /assets/devel/
 /assets/packed.pak
+/assets/*
+!/assets/opensb/
+!/assets/opensb/**
 /mods/*.pak
 /mods/*
+/client.tar
+/server.tar
+/tmp/
 */.vs/
 *.vs/
 *.sln
