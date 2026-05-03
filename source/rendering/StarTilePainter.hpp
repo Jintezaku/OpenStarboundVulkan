@@ -131,6 +131,13 @@ private:
   bool m_enableAdaptiveChunkHashCadence;
   int m_chunkHashRefreshBaseStrideFrames;
   int m_chunkHashRefreshMaxStrideFrames;
+  int m_chunkHashFarStrideFrames;
+  bool m_enableDistanceWeightedChunkHashCadence;
+  bool m_enableVisibleChunkPriority;
+  int m_criticalChunkSyncBuildsPerFrame;
+  bool m_enableChunkPrefetch;
+  int m_chunkPrefetchRing;
+  int m_chunkPrefetchPerFrame;
   uint64_t m_setupFrameIndex;
   Maybe<uint64_t> m_cachedWorldRenderGeneration;
   Maybe<Vec2U> m_cachedWorldSize;

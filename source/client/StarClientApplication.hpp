@@ -179,10 +179,13 @@ private:
     double stressNextExplosionPulseAtSeconds = 0.0;
     double stressNextJumpAtSeconds = 0.0;
     double stressNextWeatherPulseAtSeconds = 0.0;
+    double stressNextEntityTrimAtSeconds = 0.0;
     double scenarioNextActionAtSeconds = 0.0;
     uint64_t scenarioPreparationAttempts = 0;
     bool stressTerrainRebuildPass = false;
     bool stressWeatherForceEnabled = true;
+    StringList stressWeatherCycle;
+    size_t stressWeatherCycleIndex = 0;
     bool scenarioPlayerReady = false;
     bool scenarioLateGameReady = false;
     Maybe<Uuid> scenarioPlayerUuid;
@@ -208,6 +211,9 @@ private:
     uint64_t stressTerrainTilesDamaged = 0;
     uint64_t stressTerrainTilesRebuilt = 0;
     uint64_t stressLiquidTileWrites = 0;
+    uint64_t stressTrimmedItemDrops = 0;
+    uint64_t stressTrimmedNpcs = 0;
+    uint64_t stressTrimmedMonsters = 0;
 
     BenchmarkPhase phase = BenchmarkPhase::Disabled;
     uint64_t startedAtMonotonicUs = 0;
@@ -277,6 +283,9 @@ private:
   void benchmarkStressTerrainPulse(WorldClientPtr const& worldClient);
   void benchmarkStressLiquidPulse(WorldClientPtr const& worldClient);
   void benchmarkStressExplosionPulse(WorldClientPtr const& worldClient);
+  void benchmarkTrimStressEntities(WorldClientPtr const& worldClient);
+  void benchmarkEnsureStressWeatherCycle();
+  String benchmarkNextStressWeather();
   Vec2I benchmarkStressAnchorTile(WorldClientPtr const& worldClient);
   Vec2F benchmarkStressCommandAim(WorldClientPtr const& worldClient);
   Vec2F benchmarkStressSpawnPosition(WorldClientPtr const& worldClient);

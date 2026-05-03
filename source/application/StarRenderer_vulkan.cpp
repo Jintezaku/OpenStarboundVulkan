@@ -19,6 +19,7 @@
 #include "StarCasting.hpp"
 #include "StarFile.hpp"
 #include "StarLogging.hpp"
+#include "StarMathCommon.hpp"
 
 namespace Star {
 
@@ -2154,6 +2155,131 @@ RefPtr<VulkanTexture> asVulkanTexture(TexturePtr const& texture, RefPtr<VulkanTe
   return whiteTexture;
 }
 
+Image copyImageView(ImageView const& imageView) {
+  if (imageView.empty() || !imageView.data)
+    return {};
+
+  Image image(imageView.size, imageView.format);
+  size_t byteCount = (size_t)imageView.size[0] * (size_t)imageView.size[1] * (size_t)bytesPerPixel(imageView.format);
+  if (byteCount > 0)
+    std::memcpy(image.data(), imageView.data, byteCount);
+  return image;
+}
+
+Vec3F readLightMapTexel(Image const& lightMap, int x, int y) {
+  if (lightMap.empty() || !lightMap.data())
+    return Vec3F::filled(1.0f);
+
+  int width = (int)lightMap.width();
+  int height = (int)lightMap.height();
+  if (width <= 0 || height <= 0)
+    return Vec3F::filled(1.0f);
+
+  x = std::clamp(x, 0, width - 1);
+  y = std::clamp(y, 0, height - 1);
+
+  size_t pixelOffset = ((size_t)y * (size_t)width + (size_t)x) * (size_t)lightMap.bytesPerPixel();
+  auto pixel = lightMap.data() + pixelOffset;
+
+  uint8_t r = 255;
+  uint8_t g = 255;
+  uint8_t b = 255;
+  switch (lightMap.pixelFormat()) {
+  case PixelFormat::RGB24:
+  case PixelFormat::RGBA32:
+    r = pixel[0];
+    g = pixel[1];
+    b = pixel[2];
+    break;
+  case PixelFormat::BGR24:
+  case PixelFormat::BGRA32:
+    r = pixel[2];
+    g = pixel[1];
+    b = pixel[0];
+    break;
+  case PixelFormat::RGB_F: {
+    auto fp = reinterpret_cast<float const*>(pixel);
+    auto soften = [](float value) {
+      float clamped = std::max(0.0f, value);
+      float lower = std::min(clamped, 1.0f);
+      float upper = std::max(clamped, 1.0f) - 1.0f;
+      return lower + (upper / (1.0f + upper));
+    };
+    return Vec3F(soften(fp[0]), soften(fp[1]), soften(fp[2]));
+  }
+  case PixelFormat::RGBA_F: {
+    auto fp = reinterpret_cast<float const*>(pixel);
+    auto soften = [](float value) {
+      float clamped = std::max(0.0f, value);
+      float lower = std::min(clamped, 1.0f);
+      float upper = std::max(clamped, 1.0f) - 1.0f;
+      return lower + (upper / (1.0f + upper));
+    };
+    return Vec3F(soften(fp[0]), soften(fp[1]), soften(fp[2]));
+  }
+  default: {
+    auto clamped = lightMap.clamprgb(x, y);
+    r = clamped[0];
+    g = clamped[1];
+    b = clamped[2];
+    break;
+  }
+  }
+
+  return Vec3F(byteToFloat(r), byteToFloat(g), byteToFloat(b));
+}
+
+Vec3F sampleLightMap(Image const& lightMap, Vec2F const& lightMapCoordinate) {
+  if (lightMap.empty() || !lightMap.data())
+    return Vec3F::filled(1.0f);
+
+  float sampleX = lightMapCoordinate[0] - 0.5f;
+  float sampleY = lightMapCoordinate[1] - 0.5f;
+  int x0 = (int)std::floor(sampleX);
+  int y0 = (int)std::floor(sampleY);
+  int x1 = x0 + 1;
+  int y1 = y0 + 1;
+
+  float tx = sampleX - (float)x0;
+  float ty = sampleY - (float)y0;
+  tx = std::clamp(tx, 0.0f, 1.0f);
+  ty = std::clamp(ty, 0.0f, 1.0f);
+
+  Vec3F c00 = readLightMapTexel(lightMap, x0, y0);
+  Vec3F c10 = readLightMapTexel(lightMap, x1, y0);
+  Vec3F c01 = readLightMapTexel(lightMap, x0, y1);
+  Vec3F c11 = readLightMapTexel(lightMap, x1, y1);
+
+  Vec3F cx0 = c00 * (1.0f - tx) + c10 * tx;
+  Vec3F cx1 = c01 * (1.0f - tx) + c11 * tx;
+  return cx0 * (1.0f - ty) + cx1 * ty;
+}
+
+void applyLightMapToVertexColor(VulkanRenderVertex& out, RenderVertex const& vertex,
+    bool lightMapEnabled, float lightMapMultiplier, Vec2F const& lightMapScale,
+    Vec2F const& lightMapOffset, Image const& lightMapImage, bool hasLightMapImage) {
+  if (!lightMapEnabled || !hasLightMapImage)
+    return;
+
+  float finalLightMapMultiplier = vertex.param1 * lightMapMultiplier;
+  if (finalLightMapMultiplier <= 0.0f)
+    return;
+
+  float scaleX = std::abs(lightMapScale[0]);
+  float scaleY = std::abs(lightMapScale[1]);
+  if (scaleX < 0.000001f || scaleY < 0.000001f)
+    return;
+
+  Vec2F lightMapCoordinate(
+      (out.pos[0] - lightMapOffset[0]) / lightMapScale[0],
+      (out.pos[1] - lightMapOffset[1]) / lightMapScale[1]);
+
+  auto sampledLight = sampleLightMap(lightMapImage, lightMapCoordinate) * finalLightMapMultiplier;
+  out.color[0] = floatToByte(byteToFloat(out.color[0]) * sampledLight[0], true);
+  out.color[1] = floatToByte(byteToFloat(out.color[1]) * sampledLight[1], true);
+  out.color[2] = floatToByte(byteToFloat(out.color[2]) * sampledLight[2], true);
+}
+
 VulkanRenderVertex convertVertex(RenderVertex const& vertex, Mat3F const& transformation, RefPtr<VulkanTexture> const& texture) {
   Vec2F screen = transformation * vertex.screenCoordinate;
   Vec2U textureSize = texture ? texture->size() : Vec2U::filled(1);
@@ -2387,12 +2513,52 @@ void VulkanRenderer::loadConfig(Json const& config) {
 
 void VulkanRenderer::loadEffectConfig(String const&, Json const&, StringMap<String> const&) {
   if (!m_warnedAboutEffects) {
-    Logger::warn("Vulkan renderer: effect pipeline is not implemented yet; effect config calls are currently ignored");
+    Logger::warn("Vulkan renderer: effect pipeline is not fully implemented; using compatibility path for world light-map parameters");
     m_warnedAboutEffects = true;
   }
 }
 
-void VulkanRenderer::setEffectParameter(String const&, RenderEffectParameter const&) {}
+void VulkanRenderer::setEffectParameter(String const& parameterName, RenderEffectParameter const& parameter) {
+  if (parameterName == "lightMapEnabled") {
+    if (auto value = parameter.ptr<bool>()) {
+      if (m_lightMapEnabled != *value)
+        flush(Mat3F::identity());
+      m_lightMapEnabled = *value;
+    }
+    return;
+  }
+
+  if (parameterName == "lightMapMultiplier") {
+    float multiplier = m_lightMapMultiplier;
+    if (auto value = parameter.ptr<float>())
+      multiplier = *value;
+    else if (auto value = parameter.ptr<int>())
+      multiplier = (float)*value;
+
+    if (multiplier != m_lightMapMultiplier)
+      flush(Mat3F::identity());
+    m_lightMapMultiplier = multiplier;
+    return;
+  }
+
+  if (parameterName == "lightMapScale") {
+    if (auto value = parameter.ptr<Vec2F>()) {
+      if (m_lightMapScale != *value)
+        flush(Mat3F::identity());
+      m_lightMapScale = *value;
+    }
+    return;
+  }
+
+  if (parameterName == "lightMapOffset") {
+    if (auto value = parameter.ptr<Vec2F>()) {
+      if (m_lightMapOffset != *value)
+        flush(Mat3F::identity());
+      m_lightMapOffset = *value;
+    }
+    return;
+  }
+}
 
 void VulkanRenderer::setEffectScriptableParameter(String const&, String const&, RenderEffectParameter const&) {}
 
@@ -2404,7 +2570,15 @@ Maybe<VariantTypeIndex> VulkanRenderer::getEffectScriptableParameterType(String 
   return {};
 }
 
-void VulkanRenderer::setEffectTexture(String const&, ImageView const&) {}
+void VulkanRenderer::setEffectTexture(String const& textureName, ImageView const& image) {
+  if (textureName != "lightMap")
+    return;
+
+  flush(Mat3F::identity());
+
+  m_lightMapImage = copyImageView(image);
+  m_hasLightMapImage = !m_lightMapImage.empty();
+}
 
 bool VulkanRenderer::switchEffectConfig(String const&) {
   return false;
@@ -2549,6 +2723,14 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
         out.uv[0] = vertex.textureCoordinate[0] * invW;
         out.uv[1] = vertex.textureCoordinate[1] * invH;
         out.color = vertex.color;
+        applyLightMapToVertexColor(out,
+            vertex,
+            m_lightMapEnabled,
+            m_lightMapMultiplier,
+            m_lightMapScale,
+            m_lightMapOffset,
+            m_lightMapImage,
+            m_hasLightMapImage);
         m_impl->frameVertices.push_back(out);
       };
 
@@ -2643,6 +2825,14 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
       out.uv[0] = vertex.textureCoordinate[0] * invW;
       out.uv[1] = vertex.textureCoordinate[1] * invH;
       out.color = vertex.color;
+      applyLightMapToVertexColor(out,
+          vertex,
+          m_lightMapEnabled,
+          m_lightMapMultiplier,
+          m_lightMapScale,
+          m_lightMapOffset,
+          m_lightMapImage,
+          m_hasLightMapImage);
       m_impl->frameVertices.push_back(out);
     };
 

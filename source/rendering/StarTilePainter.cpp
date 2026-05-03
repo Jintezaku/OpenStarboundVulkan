@@ -11,6 +11,7 @@
 #include "StarTime.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace Star {
@@ -38,6 +39,13 @@ TilePainter::TilePainter(RendererPtr renderer) : TileDrawer() {
   m_enableAdaptiveChunkHashCadence = true;
   m_chunkHashRefreshBaseStrideFrames = 1;
   m_chunkHashRefreshMaxStrideFrames = 4;
+  m_chunkHashFarStrideFrames = 8;
+  m_enableDistanceWeightedChunkHashCadence = true;
+  m_enableVisibleChunkPriority = true;
+  m_criticalChunkSyncBuildsPerFrame = 2;
+  m_enableChunkPrefetch = true;
+  m_chunkPrefetchRing = 1;
+  m_chunkPrefetchPerFrame = 16;
   m_setupFrameIndex = 0;
   refreshRenderConfig();
 
@@ -144,52 +152,152 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
     hashRefreshStrideFrames = std::clamp(hashRefreshStrideFrames, 1, maxStride);
   }
 
+  Vec2I chunkCenter(
+      (int)std::floor(cameraCenter[0] / (float)RenderChunkSize),
+      (int)std::floor(cameraCenter[1] / (float)RenderChunkSize));
+
+  auto chunkDistanceMetric = [&](Vec2I const& chunkIndex) {
+    int dx = std::abs(chunkIndex[0] - chunkCenter[0]);
+    int dy = std::abs(chunkIndex[1] - chunkCenter[1]);
+    return std::make_pair(std::max(dx, dy), dx + dy);
+  };
+
+  auto localHashStride = [&](Vec2I const& chunkIndex) {
+    int stride = hashRefreshStrideFrames;
+    if (m_enableDistanceWeightedChunkHashCadence) {
+      int dx = std::abs(chunkIndex[0] - chunkCenter[0]);
+      int dy = std::abs(chunkIndex[1] - chunkCenter[1]);
+      int ringDistance = std::max(dx, dy);
+      if (ringDistance > 1) {
+        int farStride = std::max(hashRefreshStrideFrames, m_chunkHashFarStrideFrames);
+        stride = std::min(farStride, hashRefreshStrideFrames + ringDistance - 1);
+      }
+    }
+    return std::max(1, stride);
+  };
+
   HashSet<Vec2I> visibleChunkIndices;
+  List<Vec2I> visibleChunkOrder;
+  int chunkCountX = std::max(0, chunkRange.xMax() - chunkRange.xMin());
+  int chunkCountY = std::max(0, chunkRange.yMax() - chunkRange.yMin());
+  visibleChunkOrder.reserve((size_t)(chunkCountX * chunkCountY));
 
   for (int x = chunkRange.xMin(); x < chunkRange.xMax(); ++x) {
     for (int y = chunkRange.yMin(); y < chunkRange.yMax(); ++y) {
       auto chunkIndex = Vec2I{x, y};
       visibleChunkIndices.add(chunkIndex);
-      auto [terrainHash, liquidHash] = cachedChunkHashes(renderData, chunkIndex, hashRefreshStrideFrames);
-      auto terrainChunk = getTerrainChunk(renderData, chunkIndex, terrainHash, terrainBudgetMicros);
-      auto liquidChunk = getLiquidChunk(renderData, chunkIndex, liquidHash, liquidBudgetMicros);
+      visibleChunkOrder.append(chunkIndex);
+    }
+  }
 
-      if (!terrainChunk) {
-        if (auto staleTerrainChunk = m_lastTerrainChunks.ptr(chunkIndex))
-          terrainChunk = *staleTerrainChunk;
+  if (m_enableVisibleChunkPriority) {
+    visibleChunkOrder.sort([&](Vec2I const& a, Vec2I const& b) {
+      auto metricA = chunkDistanceMetric(a);
+      auto metricB = chunkDistanceMetric(b);
+      if (metricA != metricB)
+        return metricA < metricB;
+      if (a[0] != b[0])
+        return a[0] < b[0];
+      return a[1] < b[1];
+    });
+  }
+
+  int criticalTerrainBuildsRemaining = worldGenerationChanged ? std::numeric_limits<int>::max() : std::max(0, m_criticalChunkSyncBuildsPerFrame);
+  int criticalLiquidBuildsRemaining = criticalTerrainBuildsRemaining;
+
+  for (auto const& chunkIndex : visibleChunkOrder) {
+    auto [terrainHash, liquidHash] = cachedChunkHashes(renderData, chunkIndex, localHashStride(chunkIndex));
+    auto terrainChunk = getTerrainChunk(renderData, chunkIndex, terrainHash, terrainBudgetMicros);
+    auto liquidChunk = getLiquidChunk(renderData, chunkIndex, liquidHash, liquidBudgetMicros);
+
+    if (!terrainChunk) {
+      if (auto staleTerrainChunk = m_lastTerrainChunks.ptr(chunkIndex)) {
+        terrainChunk = *staleTerrainChunk;
+      } else if (criticalTerrainBuildsRemaining > 0) {
+        int64_t emergencyBudget = std::numeric_limits<int64_t>::max();
+        terrainChunk = getTerrainChunk(renderData, chunkIndex, terrainHash, emergencyBudget);
+        if (terrainChunk)
+          --criticalTerrainBuildsRemaining;
+      }
+    }
+
+    if (!liquidChunk) {
+      if (auto staleLiquidChunk = m_lastLiquidChunks.ptr(chunkIndex)) {
+        liquidChunk = *staleLiquidChunk;
+      } else if (criticalLiquidBuildsRemaining > 0) {
+        int64_t emergencyBudget = std::numeric_limits<int64_t>::max();
+        liquidChunk = getLiquidChunk(renderData, chunkIndex, liquidHash, emergencyBudget);
+        if (liquidChunk)
+          --criticalLiquidBuildsRemaining;
+      }
+    }
+
+    if (terrainChunk)
+      m_lastTerrainChunks.set(chunkIndex, terrainChunk);
+    if (liquidChunk)
+      m_lastLiquidChunks.set(chunkIndex, liquidChunk);
+
+    if (terrainChunk) {
+      if (auto backgroundLayer = terrainChunk->ptr(TerrainLayer::Background)) {
+        for (auto const& pair : *backgroundLayer)
+          backgroundBuffersByZ[pair.first].append(pair.second);
       }
 
-      if (!liquidChunk) {
-        if (auto staleLiquidChunk = m_lastLiquidChunks.ptr(chunkIndex))
-          liquidChunk = *staleLiquidChunk;
+      if (auto midgroundLayer = terrainChunk->ptr(TerrainLayer::Midground)) {
+        for (auto const& pair : *midgroundLayer)
+          midgroundBuffersByZ[pair.first].append(pair.second);
       }
 
-      if (terrainChunk)
-        m_lastTerrainChunks.set(chunkIndex, terrainChunk);
-      if (liquidChunk)
-        m_lastLiquidChunks.set(chunkIndex, liquidChunk);
-
-      if (terrainChunk) {
-        if (auto backgroundLayer = terrainChunk->ptr(TerrainLayer::Background)) {
-          for (auto const& pair : *backgroundLayer)
-            backgroundBuffersByZ[pair.first].append(pair.second);
-        }
-
-        if (auto midgroundLayer = terrainChunk->ptr(TerrainLayer::Midground)) {
-          for (auto const& pair : *midgroundLayer)
-            midgroundBuffersByZ[pair.first].append(pair.second);
-        }
-
-        if (auto foregroundLayer = terrainChunk->ptr(TerrainLayer::Foreground)) {
-          for (auto const& pair : *foregroundLayer)
-            foregroundBuffersByZ[pair.first].append(pair.second);
-        }
+      if (auto foregroundLayer = terrainChunk->ptr(TerrainLayer::Foreground)) {
+        for (auto const& pair : *foregroundLayer)
+          foregroundBuffersByZ[pair.first].append(pair.second);
       }
+    }
 
-      if (liquidChunk) {
-        for (auto const& pair : *liquidChunk)
-          m_liquidBuffers.append(pair.second);
+    if (liquidChunk) {
+      for (auto const& pair : *liquidChunk)
+        m_liquidBuffers.append(pair.second);
+    }
+  }
+
+  if (m_enableChunkPrefetch && m_chunkPrefetchRing > 0 && m_chunkPrefetchPerFrame > 0
+      && (terrainBudgetMicros > 0 || liquidBudgetMicros > 0)) {
+    RectI prefetchRange = chunkRange.padded(m_chunkPrefetchRing);
+    List<Vec2I> prefetchOrder;
+
+    for (int x = prefetchRange.xMin(); x < prefetchRange.xMax(); ++x) {
+      for (int y = prefetchRange.yMin(); y < prefetchRange.yMax(); ++y) {
+        Vec2I chunkIndex{x, y};
+        if (!visibleChunkIndices.contains(chunkIndex))
+          prefetchOrder.append(chunkIndex);
       }
+    }
+
+    if (m_enableVisibleChunkPriority) {
+      prefetchOrder.sort([&](Vec2I const& a, Vec2I const& b) {
+        auto metricA = chunkDistanceMetric(a);
+        auto metricB = chunkDistanceMetric(b);
+        if (metricA != metricB)
+          return metricA < metricB;
+        if (a[0] != b[0])
+          return a[0] < b[0];
+        return a[1] < b[1];
+      });
+    }
+
+    int prefetched = 0;
+    for (auto const& chunkIndex : prefetchOrder) {
+      if (prefetched >= m_chunkPrefetchPerFrame)
+        break;
+      if (terrainBudgetMicros <= 0 && liquidBudgetMicros <= 0)
+        break;
+
+      auto [terrainHash, liquidHash] = cachedChunkHashes(renderData, chunkIndex, localHashStride(chunkIndex));
+      if (terrainBudgetMicros > 0)
+        getTerrainChunk(renderData, chunkIndex, terrainHash, terrainBudgetMicros);
+      if (liquidBudgetMicros > 0)
+        getLiquidChunk(renderData, chunkIndex, liquidHash, liquidBudgetMicros);
+      ++prefetched;
     }
   }
 
@@ -203,8 +311,12 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
       m_lastLiquidChunks.remove(chunkIndex);
   }
 
+  RectI hashRetentionRange = chunkRange;
+  if (m_enableChunkPrefetch && m_chunkPrefetchRing > 0)
+    hashRetentionRange = hashRetentionRange.padded(m_chunkPrefetchRing);
+
   for (auto const& chunkIndex : m_cachedChunkHashes.keys()) {
-    if (!visibleChunkIndices.contains(chunkIndex))
+    if (!hashRetentionRange.contains(chunkIndex))
       m_cachedChunkHashes.remove(chunkIndex);
   }
 
@@ -334,6 +446,21 @@ void TilePainter::refreshRenderConfig() {
       renderingConfig.optUInt("adaptiveChunkHashCadenceMaxStrideFrames").value(4), 1, 64);
   if (m_chunkHashRefreshMaxStrideFrames < m_chunkHashRefreshBaseStrideFrames)
     m_chunkHashRefreshMaxStrideFrames = m_chunkHashRefreshBaseStrideFrames;
+
+  m_enableDistanceWeightedChunkHashCadence = renderingConfig.optBool("distanceWeightedChunkHashCadenceEnabled").value(true);
+  m_chunkHashFarStrideFrames = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("distanceWeightedChunkHashCadenceFarStrideFrames").value(8), 1, 128);
+  if (m_chunkHashFarStrideFrames < m_chunkHashRefreshBaseStrideFrames)
+    m_chunkHashFarStrideFrames = m_chunkHashRefreshBaseStrideFrames;
+
+  m_enableVisibleChunkPriority = renderingConfig.optBool("visibleChunkPriorityEnabled").value(true);
+  m_criticalChunkSyncBuildsPerFrame = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("criticalChunkSyncBuildsPerFrame").value(2), 0, 128);
+  m_enableChunkPrefetch = renderingConfig.optBool("chunkPrefetchEnabled").value(true);
+  m_chunkPrefetchRing = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("chunkPrefetchRing").value(1), 0, 8);
+  m_chunkPrefetchPerFrame = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("chunkPrefetchPerFrame").value(16), 0, 256);
 }
 
 size_t TilePainter::TextureKeyHash::operator()(TextureKey const& key) const {

@@ -199,6 +199,10 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
 
   m_tilePainter->cleanup();
 
+  // World light-mapping must not bleed into UI layers rendered after world.
+  m_renderer->setEffectParameter("lightMapEnabled", false);
+  m_renderer->setEffectParameter("lightMapMultiplier", 1.0f);
+
   int64_t now = Time::monotonicMilliseconds();
   if (now >= m_nextCleanupTime) {
     // Skip cleanup during overloaded frames to avoid amplifying stutter spikes.

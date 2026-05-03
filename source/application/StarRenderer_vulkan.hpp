@@ -53,6 +53,15 @@ private:
   bool m_warnedAboutEffects = false;
   bool m_warnedAboutScissor = false;
 
+  // Partial Vulkan effect compatibility: world light-map parameters are
+  // applied during CPU-side vertex packing.
+  bool m_lightMapEnabled = false;
+  float m_lightMapMultiplier = 1.0f;
+  Vec2F m_lightMapScale = Vec2F::filled(1.0f);
+  Vec2F m_lightMapOffset{};
+  Image m_lightMapImage;
+  bool m_hasLightMapImage = false;
+
   bool m_limitTextureGroupSize = false;
   bool m_useMultiTexturing = true;
   unsigned m_multiSampling = 0;

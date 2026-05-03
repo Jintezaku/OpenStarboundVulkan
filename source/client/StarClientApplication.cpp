@@ -22,7 +22,9 @@
 #include "StarTileModification.hpp"
 #include "StarItemDatabase.hpp"
 #include "StarItemDrop.hpp"
+#include "StarMonster.hpp"
 #include "StarMonsterDatabase.hpp"
+#include "StarNpc.hpp"
 #include "StarNpcDatabase.hpp"
 #include "StarRootLoader.hpp"
 #include "StarInput.hpp"
@@ -1369,20 +1371,11 @@ bool ClientApplication::benchmarkEnsureScenarioPlayer() {
   if (!m_benchmark.enabled || !m_playerStorage || !m_root)
     return false;
 
-  if (m_benchmark.scenarioPlayerUuid && !m_playerStorage->maybeGetPlayerData(*m_benchmark.scenarioPlayerUuid))
-    m_benchmark.scenarioPlayerUuid = {};
-
-  PlayerPtr benchmarkPlayer;
-  if (m_benchmark.scenarioPlayerUuid) {
-    benchmarkPlayer = m_playerStorage->loadPlayer(*m_benchmark.scenarioPlayerUuid);
-  } else if (auto firstUuid = m_playerStorage->playerUuidAt(0)) {
-    benchmarkPlayer = m_playerStorage->loadPlayer(*firstUuid);
-  } else {
-    benchmarkPlayer = m_root->playerFactory()->create();
-    if (benchmarkPlayer)
-      benchmarkPlayer->setName(strf("BenchmarkPilot{}", Time::millisecondsSinceEpoch() % 1000000));
-  }
-
+  // Always create a fresh benchmark pilot in isolated storage so each run starts
+  // from a new player and ship state.
+  PlayerPtr benchmarkPlayer = m_root->playerFactory()->create();
+  if (benchmarkPlayer)
+    benchmarkPlayer->setName(strf("BenchmarkPilot{}", Time::millisecondsSinceEpoch() % 1000000));
   if (!benchmarkPlayer)
     return false;
 
@@ -2218,9 +2211,6 @@ bool ClientApplication::benchmarkIssueCommand(String const& command) {
       return false;
   }
 
-  if (m_benchmark.stressMode && m_universeClient)
-    benchmarkSyncStressCommandAim(m_universeClient->worldClient());
-
   if (!m_mainInterface) {
     m_benchmark.warnings.append(strf("Stress command skipped (no main interface): {}", command));
     return false;
@@ -2259,8 +2249,10 @@ void ClientApplication::benchmarkResetStressActions() {
   m_benchmark.stressNextExplosionPulseAtSeconds = now + 1.6;
   m_benchmark.stressNextJumpAtSeconds = now + 0.75;
   m_benchmark.stressNextWeatherPulseAtSeconds = now + 3.0;
+  m_benchmark.stressNextEntityTrimAtSeconds = now + 9.0;
   m_benchmark.stressTerrainRebuildPass = false;
   m_benchmark.stressWeatherForceEnabled = true;
+  m_benchmark.stressWeatherCycleIndex = 0;
   m_benchmark.stressAnchorTile = {};
   m_benchmark.stressCommandAimPosition = {};
 }
@@ -2470,27 +2462,30 @@ void ClientApplication::benchmarkStressSpawnAiWave() {
   static const char* Species[] = {"human", "avian", "apex", "hylotl", "floran", "glitch", "novakid"};
   uint64_t wave = m_benchmark.stressAiWaves++;
 
-  uint64_t npcCount = 2 + (wave % 3);
-  uint64_t monsterCount = 3 + (wave % 5);
+  uint64_t npcCount = std::max<uint64_t>(2, std::min<uint64_t>(8, m_benchmark.stressNpcCount / 6));
+  uint64_t monsterCount = std::max<uint64_t>(3, std::min<uint64_t>(12, m_benchmark.stressMonsterCount / 6));
+  npcCount += wave % 3;
+  monsterCount += wave % 5;
 
   for (uint64_t i = 0; i < npcCount; ++i) {
     String species = Species[(size_t)((wave + i) % (sizeof(Species) / sizeof(Species[0])))];
-    benchmarkIssueCommand(strf("/spawnnpc {} villager {}", species, 8 + (int)(wave % 5)));
+    benchmarkSpawnNpcDirect(species, "villager", (float)(8 + (int)(wave % 5)));
   }
 
   for (uint64_t i = 0; i < monsterCount; ++i)
-    benchmarkIssueCommand(strf("/spawnmonster poptop {}", 8 + (int)((wave + i) % 7)));
+    benchmarkSpawnMonsterDirect("poptop", (float)(8 + (int)((wave + i) % 7)));
 }
 
 void ClientApplication::benchmarkStressSpawnItemWave() {
   uint64_t wave = m_benchmark.stressItemWaves++;
-  uint64_t dropCount = 8 + (wave % 4);
+  uint64_t dropCount = std::max<uint64_t>(8, std::min<uint64_t>(24, m_benchmark.stressItemDrops / 8));
+  dropCount += wave % 4;
 
   for (uint64_t i = 0; i < dropCount; ++i) {
     if (((i + wave) % 2) == 0)
-      benchmarkIssueCommand("/spawnitem torch 1");
+      benchmarkSpawnItemDirect("torch", 1);
     else
-      benchmarkIssueCommand("/spawnitem copperore 1");
+      benchmarkSpawnItemDirect("copperore", 1);
   }
 }
 
@@ -2663,8 +2658,136 @@ void ClientApplication::benchmarkStressExplosionPulse(WorldClientPtr const& worl
     m_benchmark.stressTerrainTilesDamaged += (uint64_t)blastTiles.size() * 2;
   }
 
-  benchmarkIssueCommand("/spawnmonster poptop 15");
+  benchmarkSpawnMonsterDirect("poptop", 15.0f);
   ++m_benchmark.stressExplosionPulses;
+}
+
+void ClientApplication::benchmarkTrimStressEntities(WorldClientPtr const& worldClient) {
+  if (!worldClient || !m_benchmark.stressPrepared)
+    return;
+
+  benchmarkExecuteAtStressAnchor([&](WorldServer* world, PlayerPtr const&, Vec2F const& anchorPos) {
+    RectF trimRegion = RectF::withCenter(anchorPos, Vec2F(320.0f, 220.0f));
+
+    List<EntityId> itemDrops;
+    List<EntityId> npcs;
+    List<EntityId> monsters;
+
+    world->forEachEntity(trimRegion, [&](EntityPtr const& entity) {
+      if (!entity || !entity->inWorld())
+        return;
+
+      switch (entity->entityType()) {
+        case EntityType::ItemDrop:
+          itemDrops.append(entity->entityId());
+          break;
+        case EntityType::Npc:
+          npcs.append(entity->entityId());
+          break;
+        case EntityType::Monster:
+          monsters.append(entity->entityId());
+          break;
+        default:
+          break;
+      }
+    });
+
+    uint64_t keepItemDrops = std::max<uint64_t>(96, m_benchmark.stressItemDrops);
+    uint64_t keepNpcs = std::max<uint64_t>(16, m_benchmark.stressNpcCount);
+    uint64_t keepMonsters = std::max<uint64_t>(24, m_benchmark.stressMonsterCount);
+
+    auto trimEntities = [&](List<EntityId>& ids, uint64_t keepCount, uint64_t& trimmedCounter) {
+      if (ids.size() <= keepCount)
+        return;
+
+      size_t removeCount = ids.size() - keepCount;
+      for (size_t i = 0; i < removeCount; ++i) {
+        world->removeEntity(ids[i], true);
+        ++trimmedCounter;
+      }
+    };
+
+    trimEntities(itemDrops, keepItemDrops, m_benchmark.stressTrimmedItemDrops);
+    trimEntities(npcs, keepNpcs, m_benchmark.stressTrimmedNpcs);
+    trimEntities(monsters, keepMonsters, m_benchmark.stressTrimmedMonsters);
+  });
+}
+
+void ClientApplication::benchmarkEnsureStressWeatherCycle() {
+  if (!m_benchmark.stressMode || !m_benchmark.stressPrepared || !m_benchmark.stressWeatherCycle.empty())
+    return;
+
+  StringList availableWeather;
+  benchmarkExecuteAtStressAnchor([&](WorldServer* world, PlayerPtr const&, Vec2F const&) {
+    availableWeather = world->weatherList();
+  });
+
+  if (availableWeather.empty())
+    return;
+
+  struct RankedWeather {
+    int score;
+    String name;
+  };
+
+  auto scoreWeather = [](String const& weatherName) {
+    int score = 0;
+    struct MatchWeight {
+      char const* token;
+      int weight;
+    };
+    static MatchWeight const Weights[] = {
+        {"storm", 8}, {"thunder", 8}, {"blizzard", 7}, {"snow", 5}, {"sand", 6},
+        {"ash", 6}, {"wind", 5}, {"gust", 5}, {"rain", 4}, {"hail", 6},
+        {"acid", 7}, {"toxic", 7}, {"meteor", 8}, {"ember", 6}, {"fire", 6}
+    };
+
+    for (auto const& weight : Weights) {
+      if (weatherName.contains(weight.token, String::CaseInsensitive))
+        score += weight.weight;
+    }
+
+    return score;
+  };
+
+  List<RankedWeather> ranked;
+  for (auto const& weatherName : availableWeather)
+    ranked.append({scoreWeather(weatherName), weatherName});
+
+  ranked.sort([](RankedWeather const& a, RankedWeather const& b) {
+    if (a.score != b.score)
+      return a.score > b.score;
+    return a.name < b.name;
+  });
+
+  m_benchmark.stressWeatherCycle.clear();
+  for (auto const& weather : ranked) {
+    if (weather.score <= 0)
+      continue;
+    if (!m_benchmark.stressWeatherCycle.contains(weather.name))
+      m_benchmark.stressWeatherCycle.append(weather.name);
+  }
+
+  if (m_benchmark.stressWeatherCycle.empty()) {
+    for (auto const& weatherName : availableWeather) {
+      if (!m_benchmark.stressWeatherCycle.contains(weatherName))
+        m_benchmark.stressWeatherCycle.append(weatherName);
+    }
+  }
+
+  m_benchmark.stressWeatherCycleIndex = 0;
+  Logger::info("Benchmark stress weather cycle: {}", m_benchmark.stressWeatherCycle.join(", "));
+}
+
+String ClientApplication::benchmarkNextStressWeather() {
+  benchmarkEnsureStressWeatherCycle();
+  if (m_benchmark.stressWeatherCycle.empty())
+    return "rain";
+
+  size_t index = m_benchmark.stressWeatherCycleIndex % m_benchmark.stressWeatherCycle.size();
+  String weather = m_benchmark.stressWeatherCycle.at(index);
+  m_benchmark.stressWeatherCycleIndex = (index + 1) % m_benchmark.stressWeatherCycle.size();
+  return weather;
 }
 
 void ClientApplication::benchmarkUpdateStressActions(WorldClientPtr const& worldClient, String const& worldId) {
@@ -2686,10 +2809,13 @@ void ClientApplication::benchmarkUpdateStressActions(WorldClientPtr const& world
     return;
   }
 
-  benchmarkSyncStressCommandAim(worldClient);
-
   double now = monotonicSeconds();
   bool inShipWorld = benchmarkIsShipWorldId(worldId);
+  bool inPlanetWorld = worldId.beginsWith("CelestialWorld:", String::CaseInsensitive);
+
+  if (m_player->isDead())
+    m_player->revive(m_player->position() + m_player->feetOffset());
+
   benchmarkStressPlayerMovement(worldClient, now);
 
   if (now >= m_benchmark.stressNextAiWaveAtSeconds) {
@@ -2722,8 +2848,14 @@ void ClientApplication::benchmarkUpdateStressActions(WorldClientPtr const& world
     m_benchmark.stressNextExplosionPulseAtSeconds = now + m_benchmark.stressExplosionPulseIntervalSeconds * jitter;
   }
 
-  if (now >= m_benchmark.stressNextWeatherPulseAtSeconds) {
-    benchmarkIssueCommand(m_benchmark.stressWeatherForceEnabled ? "/setweather rain force" : "/setweather rain");
+  if (now >= m_benchmark.stressNextEntityTrimAtSeconds) {
+    benchmarkTrimStressEntities(worldClient);
+    m_benchmark.stressNextEntityTrimAtSeconds = now + 9.0;
+  }
+
+  if (inPlanetWorld && now >= m_benchmark.stressNextWeatherPulseAtSeconds) {
+    String nextWeather = benchmarkNextStressWeather();
+    benchmarkIssueCommand(strf("/setweather {}{}", nextWeather, m_benchmark.stressWeatherForceEnabled ? " force" : ""));
     m_benchmark.stressWeatherForceEnabled = !m_benchmark.stressWeatherForceEnabled;
     ++m_benchmark.stressWeatherPulses;
     m_benchmark.stressNextWeatherPulseAtSeconds = now + m_benchmark.stressWeatherPulseIntervalSeconds;
@@ -2746,9 +2878,6 @@ void ClientApplication::benchmarkPrepareStressScene() {
       return;
   }
 
-  if (m_universeClient)
-    benchmarkSyncStressCommandAim(m_universeClient->worldClient());
-
   if (m_player) {
     if (m_universeServer && m_universeClient && m_universeClient->clientContext()) {
       ConnectionId connectionId = m_universeClient->clientContext()->connectionId();
@@ -2768,8 +2897,11 @@ void ClientApplication::benchmarkPrepareStressScene() {
 
   if (!benchmarkIssueCommand("/respawnInWorld true"))
     return;
-  if (!benchmarkIssueCommand("/setweather rain force"))
-    return;
+
+  String currentWorldId = m_universeClient ? printWorldId(m_universeClient->playerWorld()) : String();
+  if (currentWorldId.beginsWith("CelestialWorld:", String::CaseInsensitive))
+    if (!benchmarkIssueCommand(strf("/setweather {} force", benchmarkNextStressWeather())))
+      return;
 
   if (m_benchmark.stressForceZoomOut && m_root && m_root->configuration()) {
     m_root->configuration()->set("zoomLevel", 1.0f);
@@ -2786,29 +2918,29 @@ void ClientApplication::benchmarkPrepareStressScene() {
   for (uint64_t i = 0; i < m_benchmark.stressItemDrops; ++i) {
     switch (i % 2) {
       case 0:
-        if (!benchmarkIssueCommand("/spawnitem torch 1"))
+        if (!benchmarkSpawnItemDirect("torch", 1))
           return;
         break;
       default:
-        if (!benchmarkIssueCommand("/spawnitem copperore 1"))
+        if (!benchmarkSpawnItemDirect("copperore", 1))
           return;
         break;
     }
   }
 
   for (uint64_t i = 0; i < m_benchmark.stressNpcCount; ++i)
-    if (!benchmarkIssueCommand("/spawnnpc human villager 8"))
+    if (!benchmarkSpawnNpcDirect("human", "villager", 8.0f))
       return;
 
   for (uint64_t i = 0; i < m_benchmark.stressMonsterCount; ++i)
-    if (!benchmarkIssueCommand("/spawnmonster poptop 8"))
+    if (!benchmarkSpawnMonsterDirect("poptop", 8.0f))
       return;
 
   for (uint64_t i = 0; i < m_benchmark.stressLiquidBursts; ++i) {
-    if (!benchmarkIssueCommand("/spawnliquid lava 1"))
+    if (!benchmarkSpawnLiquidDirect("lava", 1.0f))
       return;
     if ((i % 2) == 0)
-      if (!benchmarkIssueCommand("/spawnliquid poison 1"))
+      if (!benchmarkSpawnLiquidDirect("poison", 1.0f))
         return;
   }
 
@@ -2885,6 +3017,8 @@ void ClientApplication::updateBenchmark(float, WorldClientPtr const& worldClient
     m_benchmark.lastWorldId = worldId;
     m_benchmark.stressAnchorTile = {};
     m_benchmark.stressCommandAimPosition = {};
+    m_benchmark.stressWeatherCycle.clear();
+    m_benchmark.stressWeatherCycleIndex = 0;
     if (!m_benchmark.visitedWorldIds.contains(worldId))
       m_benchmark.visitedWorldIds.append(worldId);
   }
@@ -3389,7 +3523,10 @@ void ClientApplication::benchmarkFinalize(String reason) {
         {"weatherPulses", m_benchmark.stressWeatherPulses},
         {"terrainTilesDamaged", m_benchmark.stressTerrainTilesDamaged},
         {"terrainTilesRebuilt", m_benchmark.stressTerrainTilesRebuilt},
-        {"liquidTileWrites", m_benchmark.stressLiquidTileWrites}
+        {"liquidTileWrites", m_benchmark.stressLiquidTileWrites},
+        {"trimmedItemDrops", m_benchmark.stressTrimmedItemDrops},
+        {"trimmedNpcs", m_benchmark.stressTrimmedNpcs},
+        {"trimmedMonsters", m_benchmark.stressTrimmedMonsters}
       }},
       {"assetSweep", JsonObject{
         {"attempted", m_benchmark.assetSweepAttempted},

@@ -25,6 +25,47 @@ Compared with upstream OpenStarbound, this fork currently adds and prioritizes:
 - Vulkan-specific environment overrides (`STAR_VK_*` keys)
 - Vulkan device/present/swapchain/cache tuning hooks documented in `source/docs/vulkan-renderer-config.md`
 
+## Optimization Delta Vs Upstream OpenStarbound
+
+This fork includes the following engine/performance optimizations that are not part of upstream OpenStarbound:
+
+- Vulkan renderer compatibility path for world lighting/fog-of-war:
+  - Implements `lightMapEnabled`, `lightMapMultiplier`, `lightMapScale`, and `lightMapOffset` effect parameters in Vulkan.
+  - Implements `lightMap` effect texture ingestion in Vulkan (including float lightmap formats).
+  - Applies world lightmap shading during Vulkan vertex packing so world shadowing/fog-of-war is functional.
+  - Disables world lightmap effect state after world rendering so UI/HUD/inventory/item icons are not affected by world lighting.
+
+- Tile rendering architecture upgrades (`StarTilePainter`):
+  - Adaptive terrain/liquid chunk build budgets with overload-aware scaling.
+  - Adaptive chunk-hash refresh cadence.
+  - Distance-weighted chunk-hash cadence for far chunks.
+  - Visible chunk priority scheduling (camera-near chunks first).
+  - Critical synchronous build budget for visible chunks to prevent visible holes.
+  - Chunk prefetch ring around visible range with per-frame prefetch budgeting.
+  - Hash-retention window aligned to prefetch range.
+  - Config-plumbed controls for all of the above in `rendering.config`.
+
+- Benchmark/stress framework expansion (`StarClientApplication`):
+  - Isolated benchmark storage path support for repeatable runs separated from user data.
+  - Automatic benchmark player provisioning for each run (new benchmark profile/ship lifecycle).
+  - Late-game terrestrial target world selection with threat-floor control.
+  - Expanded ~5 minute stress sequence covering:
+    - movement/jump pulses
+    - AI/pathfinding load waves
+    - high-volume item/NPC/monster/liquid stress
+    - terrain destruction/rebuild pulses
+    - repeated explosion pulses
+    - heavy weather pulses
+  - Extreme weather cycle selection from available world weather definitions (meteor/ember/storm-style effects prioritized when present).
+  - Weather stress gated to planetary worlds (disabled while in ship world).
+  - Cursor-independent direct stress spawning via server-side entity/item/liquid creation (no cursor placement dependency).
+  - Stress entity trimming pass to prevent unbounded buildup during long runs.
+  - Dead-player recovery handling during stress updates to preserve benchmark continuity.
+  - Extended stress telemetry in benchmark JSON output (AI waves, liquid writes, terrain damage/rebuild counts, trim counters, weather pulses, etc.).
+
+- Upstream test-target compatibility fix:
+  - `StarTestUniverse` updated to use `entityDrawablesArena` path expected by current render data layout, restoring test target buildability.
+
 ## What Is Inherited From Upstream
 
 This project still carries the large OpenStarbound feature base. Instead of duplicating the upstream feature list here, use:
