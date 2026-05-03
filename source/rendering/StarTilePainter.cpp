@@ -40,6 +40,8 @@ TilePainter::TilePainter(RendererPtr renderer) : TileDrawer() {
   m_chunkHashRefreshBaseStrideFrames = 1;
   m_chunkHashRefreshMaxStrideFrames = 4;
   m_chunkHashFarStrideFrames = 8;
+  m_enableChunkHashRefreshBudget = true;
+  m_chunkHashRefreshBudgetPerFrame = 48;
   m_enableDistanceWeightedChunkHashCadence = true;
   m_enableVisibleChunkPriority = true;
   m_criticalChunkSyncBuildsPerFrame = 2;
@@ -152,6 +154,10 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
     hashRefreshStrideFrames = std::clamp(hashRefreshStrideFrames, 1, maxStride);
   }
 
+  int hashRefreshBudgetRemaining = worldGenerationChanged
+      ? std::numeric_limits<int>::max()
+      : std::max(1, m_chunkHashRefreshBudgetPerFrame);
+
   Vec2I chunkCenter(
       (int)std::floor(cameraCenter[0] / (float)RenderChunkSize),
       (int)std::floor(cameraCenter[1] / (float)RenderChunkSize));
@@ -206,7 +212,19 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
   int criticalLiquidBuildsRemaining = criticalTerrainBuildsRemaining;
 
   for (auto const& chunkIndex : visibleChunkOrder) {
-    auto [terrainHash, liquidHash] = cachedChunkHashes(renderData, chunkIndex, localHashStride(chunkIndex));
+    bool hashRefreshed = false;
+    bool allowHashRefresh = worldGenerationChanged
+        || !m_enableChunkHashRefreshBudget
+        || hashRefreshBudgetRemaining > 0
+        || !m_cachedChunkHashes.contains(chunkIndex);
+    auto [terrainHash, liquidHash] = cachedChunkHashes(
+        renderData,
+        chunkIndex,
+        localHashStride(chunkIndex),
+        allowHashRefresh,
+        &hashRefreshed);
+    if (hashRefreshed && !worldGenerationChanged && m_enableChunkHashRefreshBudget && hashRefreshBudgetRemaining > 0)
+      --hashRefreshBudgetRemaining;
     auto terrainChunk = getTerrainChunk(renderData, chunkIndex, terrainHash, terrainBudgetMicros);
     auto liquidChunk = getLiquidChunk(renderData, chunkIndex, liquidHash, liquidBudgetMicros);
 
@@ -292,7 +310,19 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
       if (terrainBudgetMicros <= 0 && liquidBudgetMicros <= 0)
         break;
 
-      auto [terrainHash, liquidHash] = cachedChunkHashes(renderData, chunkIndex, localHashStride(chunkIndex));
+      bool hashRefreshed = false;
+      bool allowHashRefresh = worldGenerationChanged
+          || !m_enableChunkHashRefreshBudget
+          || hashRefreshBudgetRemaining > 0
+          || !m_cachedChunkHashes.contains(chunkIndex);
+      auto [terrainHash, liquidHash] = cachedChunkHashes(
+          renderData,
+          chunkIndex,
+          localHashStride(chunkIndex),
+          allowHashRefresh,
+          &hashRefreshed);
+      if (hashRefreshed && !worldGenerationChanged && m_enableChunkHashRefreshBudget && hashRefreshBudgetRemaining > 0)
+        --hashRefreshBudgetRemaining;
       if (terrainBudgetMicros > 0)
         getTerrainChunk(renderData, chunkIndex, terrainHash, terrainBudgetMicros);
       if (liquidBudgetMicros > 0)
@@ -452,6 +482,9 @@ void TilePainter::refreshRenderConfig() {
       renderingConfig.optUInt("distanceWeightedChunkHashCadenceFarStrideFrames").value(8), 1, 128);
   if (m_chunkHashFarStrideFrames < m_chunkHashRefreshBaseStrideFrames)
     m_chunkHashFarStrideFrames = m_chunkHashRefreshBaseStrideFrames;
+  m_enableChunkHashRefreshBudget = renderingConfig.optBool("chunkHashRefreshBudgetEnabled").value(true);
+  m_chunkHashRefreshBudgetPerFrame = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("chunkHashRefreshBudgetPerFrame").value(48), 1, 4096);
 
   m_enableVisibleChunkPriority = renderingConfig.optBool("visibleChunkPriorityEnabled").value(true);
   m_criticalChunkSyncBuildsPerFrame = (int)std::clamp<uint64_t>(
@@ -497,10 +530,20 @@ pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::chunkHashes(Wo
   return {terrainHasher.digest(), liquidHasher.digest()};
 }
 
-pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::cachedChunkHashes(WorldRenderData& renderData, Vec2I chunkIndex, int hashRefreshStrideFrames) {
+pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::cachedChunkHashes(
+    WorldRenderData& renderData,
+    Vec2I chunkIndex,
+    int hashRefreshStrideFrames,
+    bool allowRefresh,
+    bool* refreshed) {
+  if (refreshed)
+    *refreshed = false;
+
   if (hashRefreshStrideFrames <= 1) {
     auto hashes = chunkHashes(renderData, chunkIndex);
     m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second});
+    if (refreshed)
+      *refreshed = true;
     return hashes;
   }
 
@@ -508,12 +551,14 @@ pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::cachedChunkHas
   uint64_t framePhase = m_setupFrameIndex % (uint64_t)hashRefreshStrideFrames;
 
   if (auto cached = m_cachedChunkHashes.ptr(chunkIndex)) {
-    if (phase != framePhase)
+    if (!allowRefresh || phase != framePhase)
       return {cached->terrainHash, cached->liquidHash};
   }
 
   auto hashes = chunkHashes(renderData, chunkIndex);
   m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second});
+  if (refreshed)
+    *refreshed = true;
   return hashes;
 }
 

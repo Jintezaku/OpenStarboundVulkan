@@ -76,7 +76,12 @@ private:
   // the render chunk.
 
   pair<ChunkHash, ChunkHash> chunkHashes(WorldRenderData& renderData, Vec2I chunkIndex) const;
-  pair<ChunkHash, ChunkHash> cachedChunkHashes(WorldRenderData& renderData, Vec2I chunkIndex, int hashRefreshStrideFrames);
+  pair<ChunkHash, ChunkHash> cachedChunkHashes(
+      WorldRenderData& renderData,
+      Vec2I chunkIndex,
+      int hashRefreshStrideFrames,
+      bool allowRefresh,
+      bool* refreshed = nullptr);
 
   void renderTerrainChunks(WorldCamera const& camera, TerrainLayer terrainLayer);
 
@@ -132,6 +137,8 @@ private:
   int m_chunkHashRefreshBaseStrideFrames;
   int m_chunkHashRefreshMaxStrideFrames;
   int m_chunkHashFarStrideFrames;
+  bool m_enableChunkHashRefreshBudget;
+  int m_chunkHashRefreshBudgetPerFrame;
   bool m_enableDistanceWeightedChunkHashCadence;
   bool m_enableVisibleChunkPriority;
   int m_criticalChunkSyncBuildsPerFrame;
