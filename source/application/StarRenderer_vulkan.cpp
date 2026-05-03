@@ -2229,8 +2229,19 @@ Vec3F readLightMapTexel(Image const& lightMap, int x, int y) {
   return Vec3F(byteToFloat(r), byteToFloat(g), byteToFloat(b));
 }
 
-Vec3F sampleLightMap(Image const& lightMap, Vec2F const& lightMapCoordinate) {
-  if (lightMap.empty() || !lightMap.data())
+Vec3F sampleLightMapPrecomputed(Vec2U const& sampleSize, std::vector<Vec3F> const& samples, int x, int y) {
+  if (sampleSize[0] == 0 || sampleSize[1] == 0 || samples.empty())
+    return Vec3F::filled(1.0f);
+
+  int width = (int)sampleSize[0];
+  int height = (int)sampleSize[1];
+  x = std::clamp(x, 0, width - 1);
+  y = std::clamp(y, 0, height - 1);
+  return samples[(size_t)y * (size_t)width + (size_t)x];
+}
+
+Vec3F sampleLightMap(Vec2F const& lightMapCoordinate, Vec2U const& sampleSize, std::vector<Vec3F> const& samples) {
+  if (sampleSize[0] == 0 || sampleSize[1] == 0 || samples.empty())
     return Vec3F::filled(1.0f);
 
   float sampleX = lightMapCoordinate[0] - 0.5f;
@@ -2245,10 +2256,10 @@ Vec3F sampleLightMap(Image const& lightMap, Vec2F const& lightMapCoordinate) {
   tx = std::clamp(tx, 0.0f, 1.0f);
   ty = std::clamp(ty, 0.0f, 1.0f);
 
-  Vec3F c00 = readLightMapTexel(lightMap, x0, y0);
-  Vec3F c10 = readLightMapTexel(lightMap, x1, y0);
-  Vec3F c01 = readLightMapTexel(lightMap, x0, y1);
-  Vec3F c11 = readLightMapTexel(lightMap, x1, y1);
+  Vec3F c00 = sampleLightMapPrecomputed(sampleSize, samples, x0, y0);
+  Vec3F c10 = sampleLightMapPrecomputed(sampleSize, samples, x1, y0);
+  Vec3F c01 = sampleLightMapPrecomputed(sampleSize, samples, x0, y1);
+  Vec3F c11 = sampleLightMapPrecomputed(sampleSize, samples, x1, y1);
 
   Vec3F cx0 = c00 * (1.0f - tx) + c10 * tx;
   Vec3F cx1 = c01 * (1.0f - tx) + c11 * tx;
@@ -2257,7 +2268,8 @@ Vec3F sampleLightMap(Image const& lightMap, Vec2F const& lightMapCoordinate) {
 
 void applyLightMapToVertexColor(VulkanRenderVertex& out, RenderVertex const& vertex,
     bool lightMapEnabled, float lightMapMultiplier, Vec2F const& lightMapScale,
-    Vec2F const& lightMapOffset, Image const& lightMapImage, bool hasLightMapImage) {
+    Vec2F const& lightMapOffset, Vec2U const& lightMapSampleSize,
+    std::vector<Vec3F> const& lightMapSamples, bool hasLightMapImage) {
   if (!lightMapEnabled || !hasLightMapImage)
     return;
 
@@ -2274,7 +2286,7 @@ void applyLightMapToVertexColor(VulkanRenderVertex& out, RenderVertex const& ver
       (out.pos[0] - lightMapOffset[0]) / lightMapScale[0],
       (out.pos[1] - lightMapOffset[1]) / lightMapScale[1]);
 
-  auto sampledLight = sampleLightMap(lightMapImage, lightMapCoordinate) * finalLightMapMultiplier;
+  auto sampledLight = sampleLightMap(lightMapCoordinate, lightMapSampleSize, lightMapSamples) * finalLightMapMultiplier;
   out.color[0] = floatToByte(byteToFloat(out.color[0]) * sampledLight[0], true);
   out.color[1] = floatToByte(byteToFloat(out.color[1]) * sampledLight[1], true);
   out.color[2] = floatToByte(byteToFloat(out.color[2]) * sampledLight[2], true);
@@ -2578,6 +2590,18 @@ void VulkanRenderer::setEffectTexture(String const& textureName, ImageView const
 
   m_lightMapImage = copyImageView(image);
   m_hasLightMapImage = !m_lightMapImage.empty();
+  m_lightMapSampleSize = m_hasLightMapImage ? m_lightMapImage.size() : Vec2U{0, 0};
+  m_lightMapSamples.clear();
+
+  if (m_hasLightMapImage) {
+    m_lightMapSamples.resize((size_t)m_lightMapSampleSize[0] * (size_t)m_lightMapSampleSize[1], Vec3F::filled(1.0f));
+    for (unsigned y = 0; y < m_lightMapSampleSize[1]; ++y) {
+      for (unsigned x = 0; x < m_lightMapSampleSize[0]; ++x) {
+        m_lightMapSamples[(size_t)y * (size_t)m_lightMapSampleSize[0] + (size_t)x] =
+            readLightMapTexel(m_lightMapImage, (int)x, (int)y);
+      }
+    }
+  }
 }
 
 bool VulkanRenderer::switchEffectConfig(String const&) {
@@ -2729,7 +2753,8 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
             m_lightMapMultiplier,
             m_lightMapScale,
             m_lightMapOffset,
-            m_lightMapImage,
+            m_lightMapSampleSize,
+            m_lightMapSamples,
             m_hasLightMapImage);
         m_impl->frameVertices.push_back(out);
       };
@@ -2831,7 +2856,8 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
           m_lightMapMultiplier,
           m_lightMapScale,
           m_lightMapOffset,
-          m_lightMapImage,
+          m_lightMapSampleSize,
+          m_lightMapSamples,
           m_hasLightMapImage);
       m_impl->frameVertices.push_back(out);
     };

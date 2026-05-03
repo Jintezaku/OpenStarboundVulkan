@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "StarRenderer.hpp"
 
@@ -61,6 +62,8 @@ private:
   Vec2F m_lightMapOffset{};
   Image m_lightMapImage;
   bool m_hasLightMapImage = false;
+  Vec2U m_lightMapSampleSize{0, 0};
+  std::vector<Vec3F> m_lightMapSamples;
 
   bool m_limitTextureGroupSize = false;
   bool m_useMultiTexturing = true;
