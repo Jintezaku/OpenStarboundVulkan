@@ -2733,35 +2733,33 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
       return m_impl->frameDraws.back();
     };
 
-    auto appendTriangle = [&](VulkanRenderer::Impl::DrawSlice& drawSlice,
-                              float invW,
-                              float invH,
-                              RenderVertex const& a,
-                              RenderVertex const& b,
-                              RenderVertex const& c) {
-      auto appendVertex = [&](RenderVertex const& vertex) {
-        VulkanRenderVertex out{};
-        Vec2F screen = useIdentityTransform ? vertex.screenCoordinate : (localTransform * vertex.screenCoordinate);
-        out.pos[0] = screen[0];
-        out.pos[1] = screen[1];
-        out.uv[0] = vertex.textureCoordinate[0] * invW;
-        out.uv[1] = vertex.textureCoordinate[1] * invH;
-        out.color = vertex.color;
-        applyLightMapToVertexColor(out,
-            vertex,
-            m_lightMapEnabled,
-            m_lightMapMultiplier,
-            m_lightMapScale,
-            m_lightMapOffset,
-            m_lightMapSampleSize,
-            m_lightMapSamples,
-            m_hasLightMapImage);
-        m_impl->frameVertices.push_back(out);
-      };
+    auto convertAndLightVertex = [&](RenderVertex const& vertex, float invW, float invH) {
+      VulkanRenderVertex out{};
+      Vec2F screen = useIdentityTransform ? vertex.screenCoordinate : (localTransform * vertex.screenCoordinate);
+      out.pos[0] = screen[0];
+      out.pos[1] = screen[1];
+      out.uv[0] = vertex.textureCoordinate[0] * invW;
+      out.uv[1] = vertex.textureCoordinate[1] * invH;
+      out.color = vertex.color;
+      applyLightMapToVertexColor(out,
+          vertex,
+          m_lightMapEnabled,
+          m_lightMapMultiplier,
+          m_lightMapScale,
+          m_lightMapOffset,
+          m_lightMapSampleSize,
+          m_lightMapSamples,
+          m_hasLightMapImage);
+      return out;
+    };
 
-      appendVertex(a);
-      appendVertex(b);
-      appendVertex(c);
+    auto appendTriangle = [&](VulkanRenderer::Impl::DrawSlice& drawSlice,
+                              VulkanRenderVertex const& a,
+                              VulkanRenderVertex const& b,
+                              VulkanRenderVertex const& c) {
+      m_impl->frameVertices.push_back(a);
+      m_impl->frameVertices.push_back(b);
+      m_impl->frameVertices.push_back(c);
       drawSlice.vertexCount += 3;
     };
 
@@ -2774,7 +2772,10 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
         float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
         float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
         auto& drawSlice = ensureDrawSlice(drawTexture);
-        appendTriangle(drawSlice, invW, invH, tri->a, tri->b, tri->c);
+        auto a = convertAndLightVertex(tri->a, invW, invH);
+        auto b = convertAndLightVertex(tri->b, invW, invH);
+        auto c = convertAndLightVertex(tri->c, invW, invH);
+        appendTriangle(drawSlice, a, b, c);
       } else if (auto quad = primitive.ptr<RenderQuad>()) {
         auto drawTexture = asVulkanTexture(quad->texture, m_impl->whiteTexture);
         if (!drawTexture)
@@ -2783,8 +2784,12 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
         float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
         float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
         auto& drawSlice = ensureDrawSlice(drawTexture);
-        appendTriangle(drawSlice, invW, invH, quad->a, quad->b, quad->c);
-        appendTriangle(drawSlice, invW, invH, quad->a, quad->c, quad->d);
+        auto a = convertAndLightVertex(quad->a, invW, invH);
+        auto b = convertAndLightVertex(quad->b, invW, invH);
+        auto c = convertAndLightVertex(quad->c, invW, invH);
+        auto d = convertAndLightVertex(quad->d, invW, invH);
+        appendTriangle(drawSlice, a, b, c);
+        appendTriangle(drawSlice, a, c, d);
       } else if (auto poly = primitive.ptr<RenderPoly>()) {
         if (poly->vertexes.size() < 3)
           continue;
@@ -2795,8 +2800,12 @@ void VulkanRenderer::renderBuffer(RenderBufferPtr const& renderBuffer, Mat3F con
         float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
         float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
         auto& drawSlice = ensureDrawSlice(drawTexture);
-        for (size_t i = 1; i + 1 < poly->vertexes.size(); ++i)
-          appendTriangle(drawSlice, invW, invH, poly->vertexes[0], poly->vertexes[i], poly->vertexes[i + 1]);
+        std::vector<VulkanRenderVertex> convertedVertices;
+        convertedVertices.reserve(poly->vertexes.size());
+        for (auto const& vertex : poly->vertexes)
+          convertedVertices.push_back(convertAndLightVertex(vertex, invW, invH));
+        for (size_t i = 1; i + 1 < convertedVertices.size(); ++i)
+          appendTriangle(drawSlice, convertedVertices[0], convertedVertices[i], convertedVertices[i + 1]);
       }
     }
   };
@@ -2836,35 +2845,33 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
     return m_impl->frameDraws.back();
   };
 
-  auto appendTriangle = [&](VulkanRenderer::Impl::DrawSlice& drawSlice,
-                            float invW,
-                            float invH,
-                            RenderVertex const& a,
-                            RenderVertex const& b,
-                            RenderVertex const& c) {
-    auto appendVertex = [&](RenderVertex const& vertex) {
-      VulkanRenderVertex out{};
-      Vec2F screen = useIdentityTransform ? vertex.screenCoordinate : (transformation * vertex.screenCoordinate);
-      out.pos[0] = screen[0];
-      out.pos[1] = screen[1];
-      out.uv[0] = vertex.textureCoordinate[0] * invW;
-      out.uv[1] = vertex.textureCoordinate[1] * invH;
-      out.color = vertex.color;
-      applyLightMapToVertexColor(out,
-          vertex,
-          m_lightMapEnabled,
-          m_lightMapMultiplier,
-          m_lightMapScale,
-          m_lightMapOffset,
-          m_lightMapSampleSize,
-          m_lightMapSamples,
-          m_hasLightMapImage);
-      m_impl->frameVertices.push_back(out);
-    };
+  auto convertAndLightVertex = [&](RenderVertex const& vertex, float invW, float invH) {
+    VulkanRenderVertex out{};
+    Vec2F screen = useIdentityTransform ? vertex.screenCoordinate : (transformation * vertex.screenCoordinate);
+    out.pos[0] = screen[0];
+    out.pos[1] = screen[1];
+    out.uv[0] = vertex.textureCoordinate[0] * invW;
+    out.uv[1] = vertex.textureCoordinate[1] * invH;
+    out.color = vertex.color;
+    applyLightMapToVertexColor(out,
+        vertex,
+        m_lightMapEnabled,
+        m_lightMapMultiplier,
+        m_lightMapScale,
+        m_lightMapOffset,
+        m_lightMapSampleSize,
+        m_lightMapSamples,
+        m_hasLightMapImage);
+    return out;
+  };
 
-    appendVertex(a);
-    appendVertex(b);
-    appendVertex(c);
+  auto appendTriangle = [&](VulkanRenderer::Impl::DrawSlice& drawSlice,
+                            VulkanRenderVertex const& a,
+                            VulkanRenderVertex const& b,
+                            VulkanRenderVertex const& c) {
+    m_impl->frameVertices.push_back(a);
+    m_impl->frameVertices.push_back(b);
+    m_impl->frameVertices.push_back(c);
     drawSlice.vertexCount += 3;
   };
 
@@ -2877,7 +2884,10 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
       float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
       float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
       auto& drawSlice = ensureDrawSlice(drawTexture);
-      appendTriangle(drawSlice, invW, invH, tri->a, tri->b, tri->c);
+      auto a = convertAndLightVertex(tri->a, invW, invH);
+      auto b = convertAndLightVertex(tri->b, invW, invH);
+      auto c = convertAndLightVertex(tri->c, invW, invH);
+      appendTriangle(drawSlice, a, b, c);
     } else if (auto quad = primitive.ptr<RenderQuad>()) {
       auto drawTexture = asVulkanTexture(quad->texture, m_impl->whiteTexture);
       if (!drawTexture)
@@ -2886,8 +2896,12 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
       float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
       float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
       auto& drawSlice = ensureDrawSlice(drawTexture);
-      appendTriangle(drawSlice, invW, invH, quad->a, quad->b, quad->c);
-      appendTriangle(drawSlice, invW, invH, quad->a, quad->c, quad->d);
+      auto a = convertAndLightVertex(quad->a, invW, invH);
+      auto b = convertAndLightVertex(quad->b, invW, invH);
+      auto c = convertAndLightVertex(quad->c, invW, invH);
+      auto d = convertAndLightVertex(quad->d, invW, invH);
+      appendTriangle(drawSlice, a, b, c);
+      appendTriangle(drawSlice, a, c, d);
     } else if (auto poly = primitive.ptr<RenderPoly>()) {
       if (poly->vertexes.size() < 3)
         continue;
@@ -2898,8 +2912,12 @@ void VulkanRenderer::flush(Mat3F const& transformation) {
       float invW = textureSize[0] > 0 ? 1.0f / (float)textureSize[0] : 0.0f;
       float invH = textureSize[1] > 0 ? 1.0f / (float)textureSize[1] : 0.0f;
       auto& drawSlice = ensureDrawSlice(drawTexture);
-      for (size_t i = 1; i + 1 < poly->vertexes.size(); ++i)
-        appendTriangle(drawSlice, invW, invH, poly->vertexes[0], poly->vertexes[i], poly->vertexes[i + 1]);
+      std::vector<VulkanRenderVertex> convertedVertices;
+      convertedVertices.reserve(poly->vertexes.size());
+      for (auto const& vertex : poly->vertexes)
+        convertedVertices.push_back(convertAndLightVertex(vertex, invW, invH));
+      for (size_t i = 1; i + 1 < convertedVertices.size(); ++i)
+        appendTriangle(drawSlice, convertedVertices[0], convertedVertices[i], convertedVertices[i + 1]);
     }
   }
 
