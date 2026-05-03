@@ -2421,6 +2421,21 @@ bool ClientApplication::benchmarkSpawnLiquidDirect(String const& liquidName, flo
   }
 }
 
+bool ClientApplication::benchmarkSetWeatherDirect(String const& weatherName, bool force) {
+  try {
+    return benchmarkExecuteAtStressAnchor([&](WorldServer* world, PlayerPtr const&, Vec2F const&) {
+      world->setWeather(weatherName, force);
+    });
+  } catch (std::exception const& e) {
+    m_benchmark.warnings.append(strf(
+        "Benchmark direct weather set failed ('{}' force={}): {}",
+        weatherName,
+        force,
+        outputException(e, false)));
+    return false;
+  }
+}
+
 void ClientApplication::benchmarkSyncStressCommandAim(WorldClientPtr const& worldClient) {
   if (!m_benchmark.stressMode || !m_player)
     return;
@@ -2855,7 +2870,7 @@ void ClientApplication::benchmarkUpdateStressActions(WorldClientPtr const& world
 
   if (inPlanetWorld && now >= m_benchmark.stressNextWeatherPulseAtSeconds) {
     String nextWeather = benchmarkNextStressWeather();
-    benchmarkIssueCommand(strf("/setweather {}{}", nextWeather, m_benchmark.stressWeatherForceEnabled ? " force" : ""));
+    benchmarkSetWeatherDirect(nextWeather, m_benchmark.stressWeatherForceEnabled);
     m_benchmark.stressWeatherForceEnabled = !m_benchmark.stressWeatherForceEnabled;
     ++m_benchmark.stressWeatherPulses;
     m_benchmark.stressNextWeatherPulseAtSeconds = now + m_benchmark.stressWeatherPulseIntervalSeconds;
@@ -2900,7 +2915,7 @@ void ClientApplication::benchmarkPrepareStressScene() {
 
   String currentWorldId = m_universeClient ? printWorldId(m_universeClient->playerWorld()) : String();
   if (currentWorldId.beginsWith("CelestialWorld:", String::CaseInsensitive))
-    if (!benchmarkIssueCommand(strf("/setweather {} force", benchmarkNextStressWeather())))
+    if (!benchmarkSetWeatherDirect(benchmarkNextStressWeather(), true))
       return;
 
   if (m_benchmark.stressForceZoomOut && m_root && m_root->configuration()) {

@@ -6,6 +6,7 @@
 #include "StarAlgorithm.hpp"
 #include "StarJsonExtra.hpp"
 #include "StarTime.hpp"
+#include <cmath>
 
 namespace Star {
 
@@ -17,13 +18,24 @@ WorldPainter::WorldPainter() {
   m_cacheCleanupInterval = 1500;
   m_cacheCleanupPhase = 0;
   m_previousFrameRenderMs = 0.0f;
+  m_frameCostEmaMs = 0.0f;
+  m_frameCostEmaSmoothing = 0.18f;
   m_particleRenderCapPerLayer = 2048;
   m_particleRenderCapPerLayerMin = 256;
   m_particleAdaptiveBudgetFrameMs = 16.7f;
+  m_particleRenderLayerBudgetMs = 3.5f;
+  m_particleRenderLayerBudgetMinMs = 0.8f;
   m_drawableCullBypassThreshold = 2048;
+  m_drawableCullBypassMaxEntityDrawables = 4096;
+  m_drawableCullBypassWarmupFrames = 90;
+  m_drawableCullBypassMaxConsecutiveFrames = 1;
   m_drawableCullBypassMaxFrameMs = 14.0f;
   m_drawableWorldCoarseCullPadding = 16.0f;
   m_skipDrawableCulling = false;
+  m_offscreenPreloadCapPerFrame = 12;
+  m_offscreenPreloadCount = 0;
+  m_fastFrameStreak = 0;
+  m_drawableCullBypassStreak = 0;
 
   m_camera.setScreenSize({800, 600});
   m_camera.setCenterWorldPosition(Vec2F());
@@ -67,6 +79,7 @@ void WorldPainter::update(float dt) {
 
 void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWaiter) {
   int64_t renderFrameStartUs = Time::monotonicMicroseconds();
+  m_offscreenPreloadCount = 0;
 
   m_camera.setScreenSize(m_renderer->screenSize());
   m_camera.setTargetPixelRatio(Root::singleton().configuration()->get("zoomLevel").toFloat());
@@ -147,9 +160,24 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
   // Main world layers
   auto& entityDrawables = renderData.entityLayerDrawables;
 
-  m_skipDrawableCulling = m_drawableCullBypassThreshold > 0
+  bool previousFrameFast = m_previousFrameRenderMs <= m_drawableCullBypassMaxFrameMs;
+  if (previousFrameFast)
+    ++m_fastFrameStreak;
+  else
+    m_fastFrameStreak = 0;
+
+  bool cullBypassEligible = m_drawableCullBypassThreshold > 0
       && renderData.entityDrawableCount >= m_drawableCullBypassThreshold
-      && m_previousFrameRenderMs <= m_drawableCullBypassMaxFrameMs;
+      && renderData.entityDrawableCount <= m_drawableCullBypassMaxEntityDrawables
+      && previousFrameFast
+      && m_fastFrameStreak >= m_drawableCullBypassWarmupFrames
+      && m_drawableCullBypassStreak < m_drawableCullBypassMaxConsecutiveFrames;
+
+  m_skipDrawableCulling = cullBypassEligible;
+  if (m_skipDrawableCulling)
+    ++m_drawableCullBypassStreak;
+  else
+    m_drawableCullBypassStreak = 0;
 
   size_t entityDrawableIndex = 0;
   auto renderEntitiesUntil = [this, &renderData, &entityDrawables, &entityDrawableIndex](Maybe<EntityRenderLayer> until) {
@@ -227,6 +255,10 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
   }
 
   m_previousFrameRenderMs = (float)(Time::monotonicMicroseconds() - renderFrameStartUs) / 1000.0f;
+  if (m_frameCostEmaMs <= 0.0f)
+    m_frameCostEmaMs = m_previousFrameRenderMs;
+  else
+    m_frameCostEmaMs += (m_previousFrameRenderMs - m_frameCostEmaMs) * m_frameCostEmaSmoothing;
 }
 
 void WorldPainter::adjustLighting(WorldRenderData& renderData) {
@@ -247,14 +279,33 @@ void WorldPainter::refreshRenderConfig() {
   m_particleRenderCapPerLayer = renderingConfig.optUInt("particleRenderCapPerLayer").value(2048);
   m_particleRenderCapPerLayerMin = renderingConfig.optUInt("particleRenderCapPerLayerMin").value(256);
   m_particleAdaptiveBudgetFrameMs = renderingConfig.optFloat("particleAdaptiveBudgetFrameMs").value(16.7f);
+  m_particleRenderLayerBudgetMs = renderingConfig.optFloat("particleRenderLayerBudgetMs").value(3.5f);
+  m_particleRenderLayerBudgetMinMs = renderingConfig.optFloat("particleRenderLayerBudgetMinMs").value(0.8f);
   if (m_particleRenderCapPerLayerMin > m_particleRenderCapPerLayer)
     m_particleRenderCapPerLayerMin = m_particleRenderCapPerLayer;
   if (m_particleAdaptiveBudgetFrameMs < 0.0f)
     m_particleAdaptiveBudgetFrameMs = 0.0f;
+  if (m_particleRenderLayerBudgetMs < 0.0f)
+    m_particleRenderLayerBudgetMs = 0.0f;
+  if (m_particleRenderLayerBudgetMinMs < 0.0f)
+    m_particleRenderLayerBudgetMinMs = 0.0f;
+  if (m_particleRenderLayerBudgetMinMs > m_particleRenderLayerBudgetMs)
+    m_particleRenderLayerBudgetMinMs = m_particleRenderLayerBudgetMs;
+  m_frameCostEmaSmoothing = renderingConfig.optFloat("frameCostEmaSmoothing").value(0.18f);
+  if (m_frameCostEmaSmoothing < 0.01f)
+    m_frameCostEmaSmoothing = 0.01f;
+  else if (m_frameCostEmaSmoothing > 1.0f)
+    m_frameCostEmaSmoothing = 1.0f;
   m_drawableCullBypassThreshold = renderingConfig.optUInt("drawableCullBypassThreshold").value(2048);
+  m_drawableCullBypassMaxEntityDrawables = renderingConfig.optUInt("drawableCullBypassMaxEntityDrawables").value(4096);
+  if (m_drawableCullBypassMaxEntityDrawables < m_drawableCullBypassThreshold)
+    m_drawableCullBypassMaxEntityDrawables = m_drawableCullBypassThreshold;
+  m_drawableCullBypassWarmupFrames = renderingConfig.optUInt("drawableCullBypassWarmupFrames").value(90);
+  m_drawableCullBypassMaxConsecutiveFrames = renderingConfig.optUInt("drawableCullBypassMaxConsecutiveFrames").value(1);
   m_drawableCullBypassMaxFrameMs = renderingConfig.optFloat("drawableCullBypassMaxFrameMs").value(14.0f);
   if (m_drawableCullBypassMaxFrameMs < 0.0f)
     m_drawableCullBypassMaxFrameMs = 0.0f;
+  m_offscreenPreloadCapPerFrame = renderingConfig.optUInt("offscreenPreloadCapPerFrame").value(12);
   m_drawableWorldCoarseCullPadding = renderingConfig.optFloat("drawableWorldCoarseCullPadding").value(16.0f);
   if (m_drawableWorldCoarseCullPadding < 0.0f)
     m_drawableWorldCoarseCullPadding = 0.0f;
@@ -287,9 +338,20 @@ void WorldPainter::renderParticles(WorldRenderData& renderData, Particle::Layer 
     particleCap = std::max(m_particleRenderCapPerLayerMin, scaledCap);
   }
 
+  float frameCostForBudget = m_frameCostEmaMs > 0.0f ? m_frameCostEmaMs : m_previousFrameRenderMs;
+  float layerBudgetMs = m_particleRenderLayerBudgetMs;
+  if (layerBudgetMs > 0.0f && m_particleAdaptiveBudgetFrameMs > 0.0f && frameCostForBudget > m_particleAdaptiveBudgetFrameMs) {
+    float scale = m_particleAdaptiveBudgetFrameMs / frameCostForBudget;
+    layerBudgetMs = std::max(m_particleRenderLayerBudgetMinMs, layerBudgetMs * scale);
+  }
+  int64_t layerBudgetUs = (int64_t)std::llround((double)layerBudgetMs * 1000.0);
+  int64_t layerStartUs = Time::monotonicMicroseconds();
+
   uint64_t renderedParticles = 0;
   for (auto particlePtr : *particles) {
     if (particleCap > 0 && renderedParticles >= particleCap)
+      break;
+    if (layerBudgetUs > 0 && (Time::monotonicMicroseconds() - layerStartUs) >= layerBudgetUs)
       break;
 
     Particle const& particle = *particlePtr;
@@ -442,8 +504,13 @@ void WorldPainter::drawDrawable(Drawable drawable) {
 
   if (m_worldScreenRect.intersects(drawable.boundBox(false)))
     m_drawablePainter->drawDrawable(drawable);
-  else if (drawable.isImage() && m_previousFrameRenderMs <= 16.7f && Random::randf() < m_preloadTextureChance)
+  else if (drawable.isImage()
+      && (m_offscreenPreloadCapPerFrame == 0 || m_offscreenPreloadCount < m_offscreenPreloadCapPerFrame)
+      && m_previousFrameRenderMs <= 16.7f
+      && Random::randf() < m_preloadTextureChance) {
     m_assets->tryImage(drawable.imagePart().image);
+    ++m_offscreenPreloadCount;
+  }
 }
 
 void WorldPainter::drawDrawableSet(List<Drawable>& drawables) {

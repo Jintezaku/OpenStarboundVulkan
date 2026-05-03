@@ -295,6 +295,7 @@ private:
   bool benchmarkSpawnNpcDirect(String const& species, String const& npcType, float level);
   bool benchmarkSpawnMonsterDirect(String const& monsterType, float level);
   bool benchmarkSpawnLiquidDirect(String const& liquidName, float quantity);
+  bool benchmarkSetWeatherDirect(String const& weatherName, bool force);
   bool benchmarkIssueCommand(String const& command);
   void benchmarkRecordFrameSample(WorldClientPtr const& worldClient, uint64_t frameUs, uint64_t worldClientUs, uint64_t worldPainterUs, uint64_t worldTotalUs, uint64_t interfaceUs);
   void benchmarkFinalize(String reason);

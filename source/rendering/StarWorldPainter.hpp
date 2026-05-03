@@ -71,15 +71,26 @@ private:
   uint64_t m_particleRenderCapPerLayer;
   uint64_t m_particleRenderCapPerLayerMin;
   float m_particleAdaptiveBudgetFrameMs;
+  float m_particleRenderLayerBudgetMs;
+  float m_particleRenderLayerBudgetMinMs;
   uint64_t m_drawableCullBypassThreshold;
+  uint64_t m_drawableCullBypassMaxEntityDrawables;
+  uint64_t m_drawableCullBypassWarmupFrames;
+  uint64_t m_drawableCullBypassMaxConsecutiveFrames;
   float m_drawableCullBypassMaxFrameMs;
   float m_drawableWorldCoarseCullPadding;
   bool m_skipDrawableCulling;
+  uint64_t m_offscreenPreloadCapPerFrame;
+  uint64_t m_offscreenPreloadCount;
+  uint64_t m_fastFrameStreak;
+  uint64_t m_drawableCullBypassStreak;
   int64_t m_textureTimeout;
   int64_t m_nextCleanupTime;
   int64_t m_cacheCleanupInterval;
   uint8_t m_cacheCleanupPhase;
   float m_previousFrameRenderMs;
+  float m_frameCostEmaMs;
+  float m_frameCostEmaSmoothing;
 
   List<Particle const*> m_backParticles;
   List<Particle const*> m_middleParticles;

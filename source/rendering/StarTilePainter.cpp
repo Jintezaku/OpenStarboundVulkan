@@ -42,6 +42,9 @@ TilePainter::TilePainter(RendererPtr renderer) : TileDrawer() {
   m_chunkHashFarStrideFrames = 8;
   m_enableChunkHashRefreshBudget = true;
   m_chunkHashRefreshBudgetPerFrame = 48;
+  m_enableAdaptiveChunkHashDebounce = true;
+  m_chunkHashDebounceMismatchFrames = 2;
+  m_chunkHashDebounceOverloadThreshold = 0.35;
   m_enableDistanceWeightedChunkHashCadence = true;
   m_enableVisibleChunkPriority = true;
   m_criticalChunkSyncBuildsPerFrame = 2;
@@ -223,6 +226,7 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
         renderData,
         chunkIndex,
         localHashStride(chunkIndex),
+        overload,
         allowHashRefresh,
         &hashRefreshed);
     if (hashRefreshed && !worldGenerationChanged && m_enableChunkHashRefreshBudget && hashRefreshBudgetRemaining > 0)
@@ -328,6 +332,7 @@ void TilePainter::setup(WorldCamera const& camera, WorldRenderData& renderData) 
           renderData,
           chunkIndex,
           localHashStride(chunkIndex),
+          overload,
           allowHashRefresh,
           &hashRefreshed);
       if (hashRefreshed && !worldGenerationChanged && m_enableChunkHashRefreshBudget && hashRefreshBudgetRemaining > 0)
@@ -494,6 +499,13 @@ void TilePainter::refreshRenderConfig() {
   m_enableChunkHashRefreshBudget = renderingConfig.optBool("chunkHashRefreshBudgetEnabled").value(true);
   m_chunkHashRefreshBudgetPerFrame = (int)std::clamp<uint64_t>(
       renderingConfig.optUInt("chunkHashRefreshBudgetPerFrame").value(48), 1, 4096);
+  m_enableAdaptiveChunkHashDebounce = renderingConfig.optBool("adaptiveChunkHashDebounceEnabled").value(true);
+  m_chunkHashDebounceMismatchFrames = (int)std::clamp<uint64_t>(
+      renderingConfig.optUInt("adaptiveChunkHashDebounceMismatchFrames").value(2), 1, 32);
+  m_chunkHashDebounceOverloadThreshold = std::clamp(
+      (double)renderingConfig.optFloat("adaptiveChunkHashDebounceOverloadThreshold").value(0.35f),
+      0.0,
+      1.0);
 
   m_enableVisibleChunkPriority = renderingConfig.optBool("visibleChunkPriorityEnabled").value(true);
   m_criticalChunkSyncBuildsPerFrame = (int)std::clamp<uint64_t>(
@@ -548,29 +560,60 @@ pair<TilePainter::ChunkHash, TilePainter::ChunkHash> TilePainter::cachedChunkHas
     WorldRenderData& renderData,
     Vec2I chunkIndex,
     int hashRefreshStrideFrames,
+    double overload,
     bool allowRefresh,
     bool* refreshed) {
   if (refreshed)
     *refreshed = false;
 
-  if (hashRefreshStrideFrames <= 1) {
-    auto hashes = chunkHashes(renderData, chunkIndex);
-    m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second});
-    if (refreshed)
-      *refreshed = true;
-    return hashes;
-  }
+  auto commitHashesWithDebounce = [&](CachedChunkHashes* cached, pair<ChunkHash, ChunkHash> const& hashes) {
+    bool changed = false;
 
-  uint64_t phase = hashOf(chunkIndex[0], chunkIndex[1]) % (uint64_t)hashRefreshStrideFrames;
-  uint64_t framePhase = m_setupFrameIndex % (uint64_t)hashRefreshStrideFrames;
+    auto commitOne = [&](ChunkHash newHash, ChunkHash& cachedHash, uint16_t& mismatchStreak) {
+      if (newHash == cachedHash) {
+        mismatchStreak = 0;
+        return cachedHash;
+      }
+
+      uint16_t requiredMismatches = (uint16_t)std::max(1, m_chunkHashDebounceMismatchFrames);
+      bool debounceActive = m_enableAdaptiveChunkHashDebounce
+          && overload >= m_chunkHashDebounceOverloadThreshold
+          && requiredMismatches > 1;
+      if (debounceActive && mismatchStreak + 1 < requiredMismatches) {
+        ++mismatchStreak;
+        return cachedHash;
+      }
+
+      cachedHash = newHash;
+      mismatchStreak = 0;
+      changed = true;
+      return cachedHash;
+    };
+
+    ChunkHash terrainHash = commitOne(hashes.first, cached->terrainHash, cached->terrainMismatchStreak);
+    ChunkHash liquidHash = commitOne(hashes.second, cached->liquidHash, cached->liquidMismatchStreak);
+    if (changed && refreshed)
+      *refreshed = true;
+    return std::make_pair(terrainHash, liquidHash);
+  };
 
   if (auto cached = m_cachedChunkHashes.ptr(chunkIndex)) {
-    if (!allowRefresh || phase != framePhase)
+    if (!allowRefresh)
       return {cached->terrainHash, cached->liquidHash};
+
+    if (hashRefreshStrideFrames > 1) {
+      uint64_t phase = hashOf(chunkIndex[0], chunkIndex[1]) % (uint64_t)hashRefreshStrideFrames;
+      uint64_t framePhase = m_setupFrameIndex % (uint64_t)hashRefreshStrideFrames;
+      if (phase != framePhase)
+        return {cached->terrainHash, cached->liquidHash};
+    }
+
+    auto hashes = chunkHashes(renderData, chunkIndex);
+    return commitHashesWithDebounce(cached, hashes);
   }
 
   auto hashes = chunkHashes(renderData, chunkIndex);
-  m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second});
+  m_cachedChunkHashes.set(chunkIndex, CachedChunkHashes{hashes.first, hashes.second, 0, 0});
   if (refreshed)
     *refreshed = true;
   return hashes;

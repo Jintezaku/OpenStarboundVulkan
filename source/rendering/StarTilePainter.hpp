@@ -80,6 +80,7 @@ private:
       WorldRenderData& renderData,
       Vec2I chunkIndex,
       int hashRefreshStrideFrames,
+      double overload,
       bool allowRefresh,
       bool* refreshed = nullptr);
 
@@ -108,6 +109,8 @@ private:
   struct CachedChunkHashes {
     ChunkHash terrainHash;
     ChunkHash liquidHash;
+    uint16_t terrainMismatchStreak = 0;
+    uint16_t liquidMismatchStreak = 0;
   };
   HashMap<Vec2I, CachedChunkHashes> m_cachedChunkHashes;
   HashMap<Vec2I, shared_ptr<TerrainChunk const>> m_lastTerrainChunks;
@@ -139,6 +142,9 @@ private:
   int m_chunkHashFarStrideFrames;
   bool m_enableChunkHashRefreshBudget;
   int m_chunkHashRefreshBudgetPerFrame;
+  bool m_enableAdaptiveChunkHashDebounce;
+  int m_chunkHashDebounceMismatchFrames;
+  double m_chunkHashDebounceOverloadThreshold;
   bool m_enableDistanceWeightedChunkHashCadence;
   bool m_enableVisibleChunkPriority;
   int m_criticalChunkSyncBuildsPerFrame;
